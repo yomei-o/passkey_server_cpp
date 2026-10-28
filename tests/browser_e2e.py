@@ -22,6 +22,7 @@ SHOT = sys.argv[2] if len(sys.argv) > 2 else ""
 T = int(time.time())
 USER = "first_%d" % T
 USER2 = "second_%d" % T
+USER3 = "third_%d" % T
 
 ck = Checker()
 
@@ -58,8 +59,8 @@ with sync_playwright() as p:
 
     print("--- the first user ---")
     signup(page, USER)
-    ck(USER in page.inner_text("#who") and "承認待ち" not in page.inner_text("#who"),
-       "the first user is logged in and approved")
+    ck(USER in page.inner_text("#who") and "管理者" in page.inner_text("#who"),
+       "the first user is logged in as an admin")
     ck(page.locator("#pendingCard").is_hidden(), "no pending notice")
     ck(page.locator("#membersCard").is_visible(), "members card is shown")
     ck(page.locator("#keys .key").count() == 1 and "ES256" in page.inner_text("#keys"),
@@ -80,7 +81,7 @@ with sync_playwright() as p:
     ck(True, "a logged-out browser sees the same state")
     ck(viewer.locator("#toggle").is_disabled(), "toggle is disabled when logged out")
 
-    print("\n--- the second user: pending -> approved ---")
+    print("\n--- the second user: pending -> approved as a member ---")
     page2 = browser.new_context().new_page()
     add_authenticator(page2)
     page2.goto(BASE + "/html/index.html")
@@ -92,10 +93,17 @@ with sync_playwright() as p:
 
     wait_text(page, "#members", USER2)                   # 1 人目の画面に 4 秒ごとの確認で出てくる
     ck("承認待ち" in page.inner_text("#members"), "the first user sees the pending request")
-    page.click("#members button.primary")
-    wait_text(page, "#msgMembers", "許可しました")
+    ck(page.locator("#members button[data-role=admin]").count() == 1
+       and page.locator("#members button[data-role=member]").count() == 1,
+       "the admin can choose admin or member")
+    page.click("#members button[data-role=member]")
+    wait_text(page, "#msgMembers", "一般として許可しました")
     page2.wait_for_selector("#toggle:not([disabled])", timeout=8000)
     ck(page2.locator("#pendingCard").is_hidden(), "after approval the pending notice goes away (no reload)")
+    wait_text(page2, "#who", "一般")
+    page2.wait_for_selector("#membersCard:not(.hidden)", timeout=8000)
+    wait_text(page2, "#members", USER)
+    ck(page2.locator("#members button").count() == 0, "a member sees members but no approve / delete buttons")
     page2.click("#toggle")
     wait_text(page2, "#lastBy", USER2)
     wait_text(page, "#lastBy", USER2)
@@ -110,13 +118,27 @@ with sync_playwright() as p:
     wait_text(page3, "#msgOut", "user already exists")
     ck(True, "signing up with a taken name is refused")
 
+    print("\n--- the last admin cannot leave ---")
+    page.on("dialog", lambda d: d.accept())
+    page.click("#keys .key button.danger")
+    wait_text(page, "#msgIn", "退会できません")
+    ck(page.locator("#keys .key").count() == 1, "the only admin's last passkey is kept")
+
+    print("\n--- the third user: approved as an admin ---")
+    signup(page3, USER3)
+    wait_text(page, "#members", USER3)
+    page.locator("#members .member", has_text=USER3).locator("button[data-role=admin]").click()
+    wait_text(page, "#msgMembers", "管理者として許可しました")
+    wait_text(page3, "#who", "管理者")
+    page3.wait_for_selector("#members button.danger", timeout=8000)
+    ck(True, "the new admin gets approve / delete buttons")
+
     if SHOT:
         page.set_viewport_size({"width": 800, "height": 1400})
         page.screenshot(path=SHOT, full_page=True)
         print("screenshot:", SHOT)
 
     print("\n--- delete another account ---")
-    page.on("dialog", lambda d: d.accept())
     page.locator("#members .member", has_text=USER2).locator("button.danger").click()
     wait_text(page, "#msgMembers", "削除しました")
     page2.wait_for_selector("#loggedOut:not(.hidden)", timeout=8000)
@@ -142,7 +164,7 @@ with sync_playwright() as p:
     page.click("#keys .key button.danger")
     page.wait_for_selector("#loggedOut:not(.hidden)", timeout=5000)
     wait_text(page, "#msgOut", "アカウントを削除しました")
-    ck(True, "deleting the last passkey deletes the account and logs out")
+    ck(True, "with another admin, deleting the last passkey deletes the account and logs out")
     browser.close()
 
 sys.exit(ck.finish())

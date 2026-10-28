@@ -51,13 +51,15 @@ class PasskeyChallenge(Base):
 
 
 # アカウント。status は "approved"（承認済み）/ "pending"（承認待ち）
-#   最初の 1 人は登録した時点で approved、2 人目からは承認済みの誰かが approve する
+#   role は "admin"（管理者）/ "member"（一般）。承認待ちの間は NULL
+#   最初の 1 人は登録した時点で approved / admin、2 人目からは管理者が role を決めて approve する
 class Account(Base):
     __tablename__ = "account"
 
     id = Column(Integer, primary_key=True, autoincrement=True, comment="ID")
     user = Column(Text, nullable=False)
     status = Column(Text, nullable=False)
+    role = Column(Text)
     approved_by = Column(Text)
     approved_at = Column(DateTime)
     created_at = Column(DateTime)

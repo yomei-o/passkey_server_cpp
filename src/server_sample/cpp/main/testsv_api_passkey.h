@@ -14,11 +14,11 @@
 //   /api/passkey/v0/delete             自分のパスキーを削除（最後の 1 本ならアカウントごと消える）
 //
 //   /api/account/v0/list               全アカウントの一覧（承認済みの人だけ）
-//   /api/account/v0/approve            承認待ちのアカウントを承認する（承認済みの人だけ）
-//   /api/account/v0/delete             自分以外のアカウントを消す（承認済みの人だけ。承認待ちを消せば却下）
+//   /api/account/v0/approve            承認待ちを管理者 / 一般として承認する（管理者だけ）
+//   /api/account/v0/delete             自分以外のアカウントを消す（管理者だけ。承認待ちを消せば却下）
 //
-// 最初の 1 人は登録した時点で承認済み。2 人目からは登録・ログインはできるが承認待ちで、
-// 承認済みの誰かが approve するまでスイッチを触れない。
+// 最初の 1 人は登録した時点で承認済みの管理者。2 人目からは登録・ログインはできるが承認待ちで、
+// 管理者が role（admin / member）を決めて approve するまでスイッチを触れない。
 //
 // Python 版は python/testsv_api_passkey.py。検査の順番と失敗時の message を揃えてある。
 // 署名検証は同梱の mbedtls（mbedtlspp.hpp）。
@@ -63,6 +63,8 @@ namespace passkey {
 
     static const char* const ACCOUNT_APPROVED = "approved";
     static const char* const ACCOUNT_PENDING = "pending";
+    static const char* const ROLE_ADMIN = "admin";
+    static const char* const ROLE_MEMBER = "member";
 
     static const char* const PASSKEY_COLUMNS[] = {
         "user", "name", "credential_id", "user_handle", "alg", "public_key", "sign_count",
@@ -580,7 +582,8 @@ namespace passkey {
 
     struct AccountRow {
         int64_t id = -1;
-        std::string user, status, approved_by, approved_at, created_at;
+        std::string user, status, role, approved_by, approved_at, created_at;
+        bool role_null = true;
         bool approved_by_null = true;
     };
 
@@ -591,6 +594,8 @@ namespace passkey {
             out.id = a.id;
             out.user = a.user.value();
             out.status = a.status.value();
+            out.role_null = a.role.is_null();
+            out.role = a.role.value();
             out.approved_by_null = a.approvedBy.is_null();
             out.approved_by = a.approvedBy.value();
             out.approved_at = a.approvedAt.value();
@@ -610,6 +615,26 @@ namespace passkey {
     {
         AccountRow a;
         return get_account(db, user, a) && a.status == ACCOUNT_APPROVED;
+    }
+
+    // 承認済みなら role、承認待ちや存在しなければ null
+    static inline json role_of(sql::connection& db, const std::string& user)
+    {
+        AccountRow a;
+        if (!get_account(db, user, a) || a.status != ACCOUNT_APPROVED || a.role_null) return nullptr;
+        return a.role;
+    }
+
+    static inline size_t admin_count(sql::connection& db)
+    {
+        const auto tab = test::passkey::Account{};
+        size_t n = 0;
+        for (const auto& a : db(select(tab.id).from(tab)
+            .where(tab.status == ACCOUNT_APPROVED and tab.role == ROLE_ADMIN))) {
+            (void)a;
+            n++;
+        }
+        return n;
     }
 
     //
@@ -663,6 +688,14 @@ namespace passkey {
     {
         std::string user = session_user(db, skey);
         if (!is_approved(db, user)) throw PasskeyError("not approved");
+        return user;
+    }
+
+    // 管理者だけが使える API の入口
+    static inline std::string admin_user(sql::connection& db, const std::string& skey)
+    {
+        std::string user = approved_user(db, skey);
+        if (role_of(db, user) != ROLE_ADMIN) throw PasskeyError("admin only");
         return user;
     }
 
@@ -773,6 +806,7 @@ namespace passkey {
         json o = json::object();
         o["user"] = a.user;
         o["status"] = a.status;
+        o["role"] = a.role_null ? json(nullptr) : json(a.role);
         o["approved_by"] = a.approved_by_null ? json(nullptr) : json(a.approved_by);
         o["approved_at"] = format_time(a.approved_at);
         o["created_at"] = format_time(a.created_at);
@@ -894,12 +928,13 @@ namespace passkey {
             tab.aaguid = format_aaguid(ad.aaguid), tab.name = name,
             tab.createdAt = now, tab.updatedAt = now));
         if (skey == "") {
-            // 新規アカウント。承認済みの人がまだ誰もいなければ（＝最初の 1 人）そのまま承認済み
+            // 新規アカウント。承認済みの人がまだ誰もいなければ（＝最初の 1 人）そのまま承認済みの管理者
             const auto atab = test::passkey::Account{};
             bool first = db(select(atab.id).from(atab).where(atab.status == ACCOUNT_APPROVED)).empty();
             if (first) {
                 db(insert_into(atab).set(atab.user = ch.user, atab.status = ACCOUNT_APPROVED,
-                    atab.approvedBy = ch.user, atab.approvedAt = now, atab.createdAt = now));
+                    atab.role = ROLE_ADMIN, atab.approvedBy = ch.user, atab.approvedAt = now,
+                    atab.createdAt = now));
             }
             else {
                 db(insert_into(atab).set(atab.user = ch.user, atab.status = ACCOUNT_PENDING,
@@ -913,6 +948,7 @@ namespace passkey {
         ret["status"] = "success";
         ret["user"] = ch.user;
         ret["approved"] = is_approved(db, ch.user);
+        ret["role"] = role_of(db, ch.user);
         ret["passkey"] = passkey_to_json(p);
         if (skey == "") {
             // 新規アカウントはそのままログイン状態にする（承認待ちでもログインはできる）
@@ -986,6 +1022,7 @@ namespace passkey {
         ret["status"] = "success";
         ret["user"] = p.user;
         ret["approved"] = is_approved(db, p.user);
+        ret["role"] = role_of(db, p.user);
         ret["access_token"] = create_session(db, p.user);
         return ret;
     }
@@ -999,6 +1036,7 @@ namespace passkey {
         ret["status"] = "success";
         ret["user"] = s.user;
         ret["approved"] = is_approved(db, s.user);
+        ret["role"] = role_of(db, s.user);
         ret["expire"] = format_time(s.expire);
         return ret;
     }
@@ -1042,6 +1080,10 @@ namespace passkey {
         if (cred_id == "") throw PasskeyError("invalid request");
         PasskeyRow p;
         if (!get_passkey(db, cred_id, p) || p.user != user) throw PasskeyError("unknown credential");
+        // 最後の管理者が退会すると誰も承認できなくなるので止める
+        if (get_user_passkeys(db, user).size() == 1 && role_of(db, user) == ROLE_ADMIN && admin_count(db) == 1) {
+            throw PasskeyError("last admin cannot leave");
+        }
         const auto tab = test::passkey::Passkey{};
         db(remove_from(tab).where(tab.id == p.id));
         bool account_deleted = get_user_passkeys(db, user).empty();
@@ -1075,17 +1117,20 @@ namespace passkey {
         return ret;
     }
 
+    // {user, role}。role は "admin"（管理者）か "member"（一般）
     static inline json account_approve(sql::connection& db, const json& body,
                                        const std::string& skey, const Request& req)
     {
-        std::string user = approved_user(db, skey);
+        std::string user = admin_user(db, skey);
         std::string target = str_of(body, "user");
         if (target == "") throw PasskeyError("invalid request");
+        std::string role = str_of(body, "role");
+        if (role != ROLE_ADMIN && role != ROLE_MEMBER) throw PasskeyError("invalid role");
         AccountRow a;
         if (!get_account(db, target, a)) throw PasskeyError("unknown account");
         if (a.status == ACCOUNT_APPROVED) throw PasskeyError("already approved");
         const auto tab = test::passkey::Account{};
-        db(update(tab).set(tab.status = ACCOUNT_APPROVED, tab.approvedBy = user,
+        db(update(tab).set(tab.status = ACCOUNT_APPROVED, tab.role = role, tab.approvedBy = user,
             tab.approvedAt = time_to_db(time(NULL))).where(tab.id == a.id));
         get_account(db, target, a);
         json ret = json::object();
@@ -1094,11 +1139,12 @@ namespace passkey {
         return ret;
     }
 
-    // 自分以外のアカウントを消す。自分のは passkey/delete で最後の 1 本を消す（退会）
+    // 自分以外のアカウントを消す（管理者も消せる。自分は消せないので管理者は 1 人以上残る）。
+    // 自分のは passkey/delete で最後の 1 本を消す（退会）
     static inline json account_delete(sql::connection& db, const json& body,
                                       const std::string& skey, const Request& req)
     {
-        std::string user = approved_user(db, skey);
+        std::string user = admin_user(db, skey);
         std::string target = str_of(body, "user");
         if (target == "") throw PasskeyError("invalid request");
         if (target == user) throw PasskeyError("cannot delete yourself");
@@ -1159,6 +1205,7 @@ namespace passkey {
         id int PRIMARY KEY AUTO_INCREMENT,
         user TEXT NOT NULL,
         status TEXT NOT NULL,
+        role TEXT,
         approved_by TEXT,
         approved_at DateTime,
         created_at DateTime)
@@ -1205,15 +1252,23 @@ namespace passkey {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user TEXT NOT NULL,
         status TEXT NOT NULL,
+        role TEXT,
         approved_by TEXT,
         approved_at TEXT,
         created_at TEXT)
         )");
 #endif
+        // role 列が無かった頃の account テーブルには列を足す（既にあればエラーになるので無視）
+        try {
+            db.execute("ALTER TABLE account ADD COLUMN role TEXT");
+        }
+        catch (...) {}
         // account テーブルが無かった頃に登録した人は、承認済みのアカウントとして引き継ぐ
         db.execute("INSERT INTO account (user, status, created_at) "
             "SELECT DISTINCT user, 'approved', '" + time_to_db(time(NULL)) + "' FROM passkey "
             "WHERE user NOT IN (SELECT user FROM account)");
+        // role が無かった頃の承認済みは、許可も削除もできたので管理者として引き継ぐ
+        db.execute("UPDATE account SET role = 'admin' WHERE status = 'approved' AND role IS NULL");
     }
 
     typedef json(*api_func)(sql::connection&, const json&, const std::string&, const Request&);

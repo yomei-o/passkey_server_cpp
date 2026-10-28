@@ -576,6 +576,22 @@ namespace passkey
       };
       using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::require_insert>;
     };
+    struct Role
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "role";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T role;
+            T& operator()() { return role; }
+            const T& operator()() const { return role; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::can_be_null>;
+    };
     struct ApprovedBy
     {
       struct _alias_t
@@ -630,6 +646,7 @@ namespace passkey
                Account_::Id,
                Account_::User,
                Account_::Status,
+               Account_::Role,
                Account_::ApprovedBy,
                Account_::ApprovedAt,
                Account_::CreatedAt>

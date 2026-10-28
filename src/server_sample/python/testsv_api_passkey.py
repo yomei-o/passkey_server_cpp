@@ -11,11 +11,11 @@
 #   /api/passkey/v0/delete             自分のパスキーを削除（最後の 1 本ならアカウントごと消える）
 #
 #   /api/account/v0/list               全アカウントの一覧（承認済みの人だけ）
-#   /api/account/v0/approve            承認待ちのアカウントを承認する（承認済みの人だけ）
-#   /api/account/v0/delete             自分以外のアカウントを消す（承認済みの人だけ。承認待ちを消せば却下）
+#   /api/account/v0/approve            承認待ちを管理者 / 一般として承認する（管理者だけ）
+#   /api/account/v0/delete             自分以外のアカウントを消す（管理者だけ。承認待ちを消せば却下）
 #
-# 最初の 1 人は登録した時点で承認済み。2 人目からは登録・ログインはできるが承認待ちで、
-# 承認済みの誰かが approve するまでスイッチを触れない。
+# 最初の 1 人は登録した時点で承認済みの管理者。2 人目からは登録・ログインはできるが承認待ちで、
+# 管理者が role（admin / member）を決めて approve するまでスイッチを触れない。
 #
 # C++ 版は cpp/main/testsv_api_passkey.h。検査の順番と失敗時の message を揃えてある。
 #
@@ -78,19 +78,32 @@ PASSKEY_COLUMNS = [
 
 ACCOUNT_APPROVED = "approved"
 ACCOUNT_PENDING = "pending"
+ROLE_ADMIN = "admin"
+ROLE_MEMBER = "member"
 
 
 def init_passkey():
     print("init_passkey()")
     model_passkey.Base.metadata.create_all(bind=engine)
-    # account テーブルが無かった頃に登録した人は、承認済みのアカウントとして引き継ぐ
+    # role 列が無かった頃の account テーブルには列を足す（既にあればエラーになるので無視）
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("ALTER TABLE account ADD COLUMN role TEXT")
+    except Exception:
+        pass
     db = SessionLocal()
     try:
+        # account テーブルが無かった頃に登録した人は、承認済みのアカウントとして引き継ぐ
         users = {u for (u,) in db.query(model_passkey.Passkey.user).distinct()}
         have = {u for (u,) in db.query(model_passkey.Account.user)}
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         for u in sorted(users - have):
             db.add(model_passkey.Account(user=u, status=ACCOUNT_APPROVED, created_at=now))
+        # role が無かった頃の承認済みは、許可も削除もできたので管理者として引き継ぐ
+        db.query(model_passkey.Account).filter(
+            model_passkey.Account.status == ACCOUNT_APPROVED,
+            model_passkey.Account.role.is_(None),
+        ).update({model_passkey.Account.role: ROLE_ADMIN})
         db.commit()
     finally:
         db.close()
@@ -443,11 +456,30 @@ def is_approved(db: Session, user: str) -> bool:
     return a is not None and a.status == ACCOUNT_APPROVED
 
 
+def role_of(db: Session, user: str):
+    a = get_account(db, user)
+    return a.role if a is not None and a.status == ACCOUNT_APPROVED else None
+
+
+def admin_count(db: Session) -> int:
+    return db.query(model_passkey.Account).filter(
+        model_passkey.Account.status == ACCOUNT_APPROVED,
+        model_passkey.Account.role == ROLE_ADMIN).count()
+
+
 # 承認済みのユーザだけが使える API の入口
 def approved_user(db: Session, skey: str) -> str:
     user = session_user(db, skey)
     if not is_approved(db, user):
         raise PasskeyError("not approved")
+    return user
+
+
+# 管理者だけが使える API の入口
+def admin_user(db: Session, skey: str) -> str:
+    user = approved_user(db, skey)
+    if role_of(db, user) != ROLE_ADMIN:
+        raise PasskeyError("admin only")
     return user
 
 
@@ -462,6 +494,7 @@ def account_to_dict(db: Session, a) -> dict:
     return {
         "user": a.user,
         "status": a.status,
+        "role": a.role,
         "approved_by": a.approved_by,
         "approved_at": format_time(a.approved_at),
         "created_at": format_time(a.created_at),
@@ -618,19 +651,20 @@ def passkey_register_verify(db: Session, skey: str, body: dict, request: Request
     )
     db.add(p)
     if not skey:
-        # 新規アカウント。承認済みの人がまだ誰もいなければ（＝最初の 1 人）そのまま承認済み
+        # 新規アカウント。承認済みの人がまだ誰もいなければ（＝最初の 1 人）そのまま承認済みの管理者
         first = db.query(model_passkey.Account).filter(
             model_passkey.Account.status == ACCOUNT_APPROVED).first() is None
         db.add(model_passkey.Account(
             user=ch["user"],
             status=ACCOUNT_APPROVED if first else ACCOUNT_PENDING,
+            role=ROLE_ADMIN if first else None,
             approved_by=ch["user"] if first else None,
             approved_at=utcnow() if first else None,
             created_at=utcnow()))
     db.commit()
     db.refresh(p)
     res = {"status": "success", "user": ch["user"], "approved": is_approved(db, ch["user"]),
-           "passkey": passkey_to_dict(p)}
+           "role": role_of(db, ch["user"]), "passkey": passkey_to_dict(p)}
     if not skey:
         # 新規アカウントはそのままログイン状態にする（承認待ちでもログインはできる）
         res["access_token"] = create_session(db, ch["user"])
@@ -691,7 +725,7 @@ def passkey_login_verify(db: Session, body: dict, request: Request) -> dict:
     p.last_used_at = utcnow()
     db.commit()
     return {"status": "success", "user": p.user, "approved": is_approved(db, p.user),
-            "access_token": create_session(db, p.user)}
+            "role": role_of(db, p.user), "access_token": create_session(db, p.user)}
 
 
 def passkey_me(db: Session, skey: str) -> dict:
@@ -699,7 +733,7 @@ def passkey_me(db: Session, skey: str) -> dict:
     if s is None:
         raise PasskeyError("not logged in")
     return {"status": "success", "user": s.user, "approved": is_approved(db, s.user),
-            "expire": format_time(s.expire)}
+            "role": role_of(db, s.user), "expire": format_time(s.expire)}
 
 
 def passkey_logout(db: Session, skey: str) -> dict:
@@ -732,6 +766,10 @@ def passkey_delete(db: Session, skey: str, body: dict) -> dict:
     p = get_passkey(db, cred_id)
     if p is None or p.user != user:
         raise PasskeyError("unknown credential")
+    # 最後の管理者が退会すると誰も承認できなくなるので止める
+    if len(get_user_passkeys(db, user)) == 1 and role_of(db, user) == ROLE_ADMIN \
+            and admin_count(db) == 1:
+        raise PasskeyError("last admin cannot leave")
     db.delete(p)
     db.commit()
     account_deleted = not get_user_passkeys(db, user)
@@ -751,26 +789,32 @@ def account_list(db: Session, skey: str) -> dict:
     }
 
 
+# {user, role}。role は "admin"（管理者）か "member"（一般）
 def account_approve(db: Session, skey: str, body: dict) -> dict:
-    user = approved_user(db, skey)
+    user = admin_user(db, skey)
     target = body.get("user")
     if not isinstance(target, str) or not target:
         raise PasskeyError("invalid request")
+    role = body.get("role")
+    if role not in (ROLE_ADMIN, ROLE_MEMBER):
+        raise PasskeyError("invalid role")
     a = get_account(db, target)
     if a is None:
         raise PasskeyError("unknown account")
     if a.status == ACCOUNT_APPROVED:
         raise PasskeyError("already approved")
     a.status = ACCOUNT_APPROVED
+    a.role = role
     a.approved_by = user
     a.approved_at = utcnow()
     db.commit()
     return {"status": "success", "account": account_to_dict(db, a)}
 
 
-# 自分以外のアカウントを消す。自分のは passkey/delete で最後の 1 本を消す（退会）
+# 自分以外のアカウントを消す（管理者も消せる。自分は消せないので管理者は 1 人以上残る）。
+# 自分のは passkey/delete で最後の 1 本を消す（退会）
 def account_delete(db: Session, skey: str, body: dict) -> dict:
-    user = approved_user(db, skey)
+    user = admin_user(db, skey)
     target = body.get("user")
     if not isinstance(target, str) or not target:
         raise PasskeyError("invalid request")

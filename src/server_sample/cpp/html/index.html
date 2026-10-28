@@ -87,6 +87,7 @@
            margin-left: 6px; border: 1px solid var(--line); color: var(--muted); }
   .badge.pending { border-color: var(--glow); color: var(--fg); }
   .badge.me { border-color: var(--accent); color: var(--accent); }
+  .badge.admin { border-color: var(--ok); color: var(--ok); }
   .note { font-size: .9rem; color: var(--muted); }
   .hidden { display: none !important; }
 </style>
@@ -100,7 +101,7 @@
   <p class="lead">
     パスキー（WebAuthn）でログインした、承認済みのメンバーだけが、みんなで共有している電気のスイッチを切り替えられます。
     スマホなら顔や指紋、PC なら Windows Hello などで本人確認します。
-    最初に登録した人は自動で承認され、2 人目からは承認済みのメンバーが許可します。
+    最初に登録した人は自動で管理者になり、2 人目からは管理者が「管理者」か「一般」として許可します。
   </p>
 
   <section class="card">
@@ -134,16 +135,16 @@
   <section class="card hidden pending" id="pendingCard">
     <h2>承認待ちです</h2>
     <p class="note">
-      登録とログインはできていますが、スイッチを使うには、すでに承認されているメンバーの誰かに
-      「許可」してもらう必要があります。許可されると、このページを開いたままで使えるようになります。
+      登録とログインはできていますが、スイッチを使うには、管理者に「許可」してもらう必要があります。
+      許可されると、このページを開いたままで使えるようになります。
     </p>
   </section>
 
   <section class="card hidden" id="membersCard">
     <h2>メンバー</h2>
     <p class="note">
-      最初に登録した人は自動で承認されます。2 人目からは、承認済みのメンバーが許可するまで承認待ちです。
-      承認済みのメンバーは、自分以外のアカウントを削除できます（承認待ちの人を消すと却下になります）。
+      最初に登録した人は自動で管理者になります。2 人目からは、管理者が「管理者」か「一般」として許可するまで承認待ちです。
+      許可と、自分以外のアカウントの削除（承認待ちの人なら却下）は管理者だけができます。
     </p>
     <div id="members"></div>
     <div class="msg" id="msgMembers"></div>
@@ -308,8 +309,8 @@ async function register(mode) {
   showMsg("msgOut", "");
   await refreshMe();
   showMsg("msgIn", mode === "add" ? "パスキーを追加しました"
-    : r.approved ? "登録してログインしました（最初のメンバーなので承認済みです）"
-    : "登録してログインしました（承認待ちです）", "ok");
+    : r.approved ? "登録してログインしました（最初のメンバーなので管理者です）"
+    : "登録してログインしました（管理者の許可待ちです）", "ok");
 }
 
 async function login() {
@@ -355,22 +356,27 @@ function utcToLocal(s) {
 
 let me = "";
 let approved = false;
+let role = null;
+
+const ROLE_LABEL = { admin: "管理者", member: "一般" };
 
 // quiet: 定期確認のときは通信ログに出さない
 async function refreshMe(quiet) {
-  const was = me + "/" + approved;
+  const was = me + "/" + approved + "/" + role;
   me = "";
   approved = false;
+  role = null;
   if (token) {
     const r = quiet ? await apiQuiet("/api/passkey/v0/me", {}) : await api("/api/passkey/v0/me", {}, true);
     if (r.status === "success") {
       me = r.user;
       approved = r.approved;
+      role = r.role;
     } else {
       setToken("");
     }
   }
-  if (quiet && was === me + "/" + approved) {
+  if (quiet && was === me + "/" + approved + "/" + role) {
     if (approved) await refreshMembers(true);
     return;
   }
@@ -382,7 +388,7 @@ async function refreshMe(quiet) {
   if (me) {
     const b = document.createElement("b");
     b.textContent = me;
-    $("who").append(b, approved ? " でログイン中" : " でログイン中（承認待ち）");
+    $("who").append(b, approved ? "（" + ROLE_LABEL[role] + "）でログイン中" : " でログイン中（承認待ち）");
   } else {
     $("who").textContent = "ログインしていません";
   }
@@ -404,7 +410,7 @@ async function refreshMembers(quiet) {
   const r = quiet ? await apiQuiet("/api/account/v0/list", {}) : await api("/api/account/v0/list", {}, true);
   const box = $("members");
   if (r.status !== "success") return;
-  const key = JSON.stringify(r.account_list);
+  const key = role + JSON.stringify(r.account_list);
   if (box.dataset.key === key) return;
   box.dataset.key = key;
   box.innerHTML = "";
@@ -425,8 +431,8 @@ async function refreshMembers(quiet) {
       left.append(s);
     }
     const badge = document.createElement("span");
-    badge.className = "badge" + (a.status === "pending" ? " pending" : "");
-    badge.textContent = a.status === "pending" ? "承認待ち" : "承認済み";
+    badge.className = "badge" + (a.status === "pending" ? " pending" : a.role === "admin" ? " admin" : "");
+    badge.textContent = a.status === "pending" ? "承認待ち" : ROLE_LABEL[a.role] || a.role;
     left.append(badge);
     const meta = document.createElement("div");
     meta.className = "meta";
@@ -436,14 +442,18 @@ async function refreshMembers(quiet) {
     const btns = document.createElement("div");
     btns.className = "row";
     btns.style.marginTop = "0";
-    if (a.status === "pending") {
-      const ok = document.createElement("button");
-      ok.className = "primary";
-      ok.textContent = "許可";
-      ok.onclick = () => approveAccount(a.user);
-      btns.append(ok);
+    // 許可と削除は管理者だけ
+    if (role === "admin" && a.status === "pending") {
+      for (const [r2, label, cls] of [["member", "一般として許可", "primary"], ["admin", "管理者として許可", ""]]) {
+        const ok = document.createElement("button");
+        if (cls) ok.className = cls;
+        ok.textContent = label;
+        ok.dataset.role = r2;
+        ok.onclick = () => approveAccount(a.user, r2);
+        btns.append(ok);
+      }
     }
-    if (a.user !== me) {
+    if (role === "admin" && a.user !== me) {
       const del = document.createElement("button");
       del.className = "danger";
       del.textContent = a.status === "pending" ? "却下" : "削除";
@@ -455,10 +465,10 @@ async function refreshMembers(quiet) {
   }
 }
 
-async function approveAccount(user) {
-  const r = await api("/api/account/v0/approve", { user }, true);
+async function approveAccount(user, r2) {
+  const r = await api("/api/account/v0/approve", { user, role: r2 }, true);
   if (r.status !== "success") return showMsg("msgMembers", "許可できません: " + r.message, "err");
-  showMsg("msgMembers", user + " を許可しました", "ok");
+  showMsg("msgMembers", user + " を" + ROLE_LABEL[r2] + "として許可しました", "ok");
   await refreshMembers();
 }
 
@@ -530,6 +540,9 @@ async function deleteKey(p, count) {
     : "「" + p.name + "」を消しますか？（端末側のパスキーは残るので、端末の設定からも消してください）";
   if (!confirm(warn)) return;
   const r = await api("/api/passkey/v0/delete", { credential_id: p.credential_id }, true);
+  if (r.message === "last admin cannot leave") {
+    return showMsg("msgIn", "管理者があなた 1 人なので退会できません。先に誰かを管理者として許可してください", "err");
+  }
   if (r.status !== "success") return showMsg("msgIn", "削除できません: " + r.message, "err");
   // 端末側にも「このパスキーはもう無い」と伝える（対応ブラウザのみ）
   try {

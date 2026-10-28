@@ -6,7 +6,8 @@
 - Python 版は FastAPI + SQLAlchemy で書いています。署名検証には cryptography を使います。
 - DB は SQLite（既定）と MySQL を切り替えられます。
 - デモとして「**みんなの電気のスイッチ**」が付いています。パスキーでログインした承認済みのメンバーだけがオン・オフを切り替えられ、状態は全員に共有されます。
-- **最初に登録した人は自動で承認**されます。2 人目からは登録・ログインはできるものの承認待ちになり、承認済みのメンバーが「許可」するまでスイッチを触れません。承認済みのメンバーは、自分以外のアカウントを削除できます（承認待ちの人を消せば却下）。
+- **最初に登録した人は自動で管理者**になります。2 人目からは登録・ログインはできるものの承認待ちになり、管理者が「**管理者**」か「**一般**」として許可するまでスイッチを触れません。
+- 許可と、自分以外のアカウントの削除（承認待ちの人なら却下）は**管理者だけ**ができます。一般メンバーはスイッチとメンバー一覧だけ使えます。最後の管理者は退会できません（誰も許可できなくなるため）。
 
 ```
 ブラウザ                                   サーバ
@@ -81,12 +82,12 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 |---|---|
 | `passkey` | パスキー 1 つにつき 1 行。`user` / `credential_id` / `user_handle` / `public_key`（COSE_Key を base64url） / `alg` / `sign_count` / `transports` / `backup_eligible` / `backed_up` / `aaguid` / `name` / `last_used_at` |
 | `passkey_challenge` | 発行したチャレンジ。検証に来たら成否にかかわらず消す（使い回し防止）。5 分で失効 |
-| `account` | アカウント 1 つにつき 1 行。`status` は `approved` / `pending`、`approved_by` / `approved_at` |
+| `account` | アカウント 1 つにつき 1 行。`status` は `approved` / `pending`、`role` は `admin` / `member`（承認待ちの間は NULL）、`approved_by` / `approved_at` |
 | `session` | ログイン中のトークン（`skey`）。24 時間で失効。アカウントが消えると無効 |
 | `switch_state` | デモのスイッチ（`value` / `updated_by` / `updated_at`） |
 
 - パスワードはありません。アカウントの最後のパスキーを消すと、アカウントごと消えます（退会）。
-- `account` テーブルが無かった頃の DB で起動すると、パスキーを持っているユーザーは承認済みとして引き継がれます。
+- `account` テーブル（や `role` 列）が無かった頃の DB で起動すると、パスキーを持っているユーザーと承認済みのユーザーは管理者として引き継がれます（それまでは誰でも許可・削除ができたため）。
 - `user_handle` は認証器に渡す `user.id` です。アカウントごとにランダムな 32 バイトで、個人情報は入れていません。
 - 時刻はすべて naive な UTC（`YYYY-MM-DD HH:MM:SS`）で保存します。C++ 版と Python 版が同じ DB を読めます。
 
@@ -103,13 +104,13 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | `/api/passkey/v0/register_verify` | 任意 | `credential.toJSON()` の形 + `name` → `{user, passkey}`。新規アカウントなら `access_token` も返す |
 | `/api/passkey/v0/login_options` | 不要 | `{user?}` → `{publicKey}`（`user` を省くと `allowCredentials` が空になり、端末のパスキーから選ぶ） |
 | `/api/passkey/v0/login_verify` | 不要 | `credential.toJSON()` の形 → `{user, access_token}` |
-| `/api/passkey/v0/me` | 要 | → `{user, approved, expire}`（`register_verify` / `login_verify` も `approved` を返す） |
+| `/api/passkey/v0/me` | 要 | → `{user, approved, role, expire}`（`register_verify` / `login_verify` も `approved` と `role` を返す） |
 | `/api/passkey/v0/logout` | 要 | このトークンのセッションを消す |
 | `/api/passkey/v0/list` | 要 | 自分のパスキー一覧 → `{user, passkey_list, columns, total_count}` |
-| `/api/passkey/v0/delete` | 要 | `{credential_id}` → `{account_deleted}`。最後の 1 本ならアカウントごと消える |
-| `/api/account/v0/list` | 承認済み | 全アカウント → `{account_list: [{user, status, approved_by, approved_at, created_at, passkey_count}]}` |
-| `/api/account/v0/approve` | 承認済み | `{user}` で承認待ちを承認する → `{account}` |
-| `/api/account/v0/delete` | 承認済み | `{user}` で自分以外のアカウントを消す（パスキーとセッションも消える） |
+| `/api/passkey/v0/delete` | 要 | `{credential_id}` → `{account_deleted}`。最後の 1 本ならアカウントごと消える（最後の管理者は不可） |
+| `/api/account/v0/list` | 承認済み | 全アカウント → `{account_list: [{user, status, role, approved_by, approved_at, created_at, passkey_count}]}` |
+| `/api/account/v0/approve` | 管理者 | `{user, role: "admin" / "member"}` で承認待ちを承認する → `{account}` |
+| `/api/account/v0/delete` | 管理者 | `{user}` で自分以外のアカウントを消す（パスキーとセッションも消える） |
 | `/api/switch/v0/get` | 不要 | → `{on, updated_by, updated_at}` |
 | `/api/switch/v0/set` | 承認済み | `{on: true/false}` → `{on, updated_by, updated_at}` |
 
@@ -135,7 +136,10 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | | ユーザ名が 1〜64 バイトで制御文字を含まないか | `invalid user name` |
 | | トークンが無効・期限切れ・アカウントが消えた | `not logged in` |
 | アカウント | 承認待ちのユーザーが承認済み限定の API を呼んだ | `not approved` |
+| | 一般メンバーが許可・削除しようとした | `admin only` |
+| | `role` が `admin` / `member` でない | `invalid role` |
 | | 存在しない / 承認済み / 自分自身 | `unknown account` / `already approved` / `cannot delete yourself` |
+| | 管理者が自分 1 人なのに最後のパスキーを消そうとした | `last admin cannot leave` |
 
 ### やっていないこと
 
@@ -203,7 +207,7 @@ python ../../tests/cpp/test_passkey.py
 python tests/browser_e2e.py http://localhost:8099
 ```
 
-`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系、承認と削除も確認します（C++ / Python とも 137 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、1 人目の登録（自動承認）→ スイッチ → 2 人目の登録（承認待ち）→ 1 人目が許可 → 2 人目がスイッチ → 1 人目が 2 人目を削除 → ログアウト・ログイン → 退会までを画面から通します。**DB が空のサーバ**に対して実行してください。
+`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系、役割・承認・削除も確認します（C++ / Python とも 145 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、1 人目の登録（自動で管理者）→ スイッチ → 2 人目の登録（承認待ち）→ 一般として許可（ボタンが出ないこと）→ 2 人目がスイッチ → 最後の管理者は退会できない → 3 人目を管理者として許可 → 2 人目を削除 → ログアウト・ログイン → 退会までを画面から通します。**DB が空のサーバ**に対して実行してください。
 
 ---
 

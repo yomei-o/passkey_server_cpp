@@ -38,6 +38,7 @@ CREATE TABLE account (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user TEXT NOT NULL,
     status TEXT NOT NULL,
+    role TEXT,
     approved_by TEXT,
     approved_at TEXT,
     created_at TEXT)
