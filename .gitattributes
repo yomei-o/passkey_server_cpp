@@ -1,0 +1,14 @@
+# Windows でクローンすると core.autocrlf=true が作業ツリーを CRLF にする。
+# シェルスクリプトがそれをやられると、WSL の bash が 1 行目から
+#   ./build_lambda_image.sh: line 3: $'\r': command not found
+# で止まる（実際に踏んだ）。*.sh だけ改行を LF に固定する。
+#
+# ここに他の種類を足すときは注意: ルールを増やすと git がそのファイルを
+# 「正規化が必要」と見なして、中身を変えていないのに差分として出てくる。
+*.sh    text eol=lf
+
+# Lambda の起動スクリプト。拡張子が無いので *.sh では拾えない。CRLF だと
+# Linux が exec できず、Runtime.InvalidEntrypoint
+#   /var/task/bootstrap: cannot execute: required file not found
+# になる（実際に踏んだ）。
+bootstrap   text eol=lf

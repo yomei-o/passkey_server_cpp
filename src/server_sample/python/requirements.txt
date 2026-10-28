@@ -1,0 +1,6 @@
+fastapi==0.128.0
+uvicorn==0.40.0
+SQLAlchemy==2.0.45
+mangum==0.20.0
+PyMySQL==1.1.2
+cryptography==46.0.3

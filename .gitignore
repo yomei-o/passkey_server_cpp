@@ -1,0 +1,25 @@
+# ビルド成果物
+build/
+src/server_sample/*/image/
+src/server_sample/*/build_image.zip
+src/server_sample/cpp/lambda_server
+src/server_sample/cpp/lambda_server_test.exe
+src/server_sample/cpp/*.o
+
+# 実行すると作られる SQLite
+src/server_sample/*/test_db.db
+tests/python/*.db
+
+# MySQL のクライアントライブラリ（GPL のバイナリなので各自で用意する）
+src/server_sample/cpp/libmysqlclient.so*
+src/server_sample/cpp/libmysql.dll
+
+# Visual Studio
+.vs/
+src/server_sample/cpp/sqlpp11_cust/
+src/server_sample/cpp/x64/
+*.user
+
+# Python
+__pycache__/
+*.pyc

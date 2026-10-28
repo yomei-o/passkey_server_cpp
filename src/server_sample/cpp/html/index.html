@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>パスキー デモ</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --fg: #1d2330; --muted: #6b7280; --line: #e3e6eb;
+    --accent: #2563eb; --accent-fg: #ffffff; --danger: #dc2626; --ok: #15803d;
+    --bulb-off: #cbd2dc; --glow: #facc15; --code: #f1f3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2028; --fg: #e6e9ef; --muted: #9aa3b2; --line: #2c333e;
+      --accent: #5b8cff; --accent-fg: #0b1020; --danger: #f87171; --ok: #4ade80;
+      --bulb-off: #3a4250; --glow: #fde047; --code: #232a35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 1.5rem; margin: 0; }
+  h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  .who { color: var(--muted); font-size: .95rem; }
+  .who b { color: var(--fg); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-top: 16px; }
+  .lead { color: var(--muted); margin: 6px 0 0; }
+  button {
+    font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input[type=text] {
+    font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); width: 100%; max-width: 280px;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  .msg { min-height: 1.6em; margin-top: 10px; font-size: .95rem; }
+  .msg.err { color: var(--danger); }
+  .msg.ok { color: var(--ok); }
+
+  /* スイッチ */
+  .light { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+  .bulb {
+    width: 96px; height: 96px; border-radius: 50%; background: var(--bulb-off);
+    transition: background .3s, box-shadow .3s; flex: none;
+  }
+  .bulb.on { background: var(--glow); box-shadow: 0 0 40px 12px color-mix(in srgb, var(--glow) 55%, transparent); }
+  .state { font-size: 1.3rem; font-weight: 700; }
+  .toggle {
+    position: relative; width: 72px; height: 40px; border-radius: 20px; padding: 0;
+    background: var(--bulb-off); border: none;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 4px; left: 4px; width: 32px; height: 32px;
+    border-radius: 50%; background: #fff; transition: left .2s;
+  }
+  .toggle.on { background: var(--accent); }
+  .toggle.on::after { left: 36px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; width: 9.5em; }
+  td code { word-break: break-all; }
+  .key { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 12px; overflow-x: auto; }
+  .key-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  code, pre { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  pre {
+    background: var(--code); padding: 12px; border-radius: 8px; overflow: auto;
+    font-size: .8rem; max-height: 360px; margin: 8px 0 0;
+  }
+  details summary { cursor: pointer; color: var(--muted); }
+  .note { font-size: .9rem; color: var(--muted); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>パスキー デモ</h1>
+    <div class="who" id="who">ログインしていません</div>
+  </header>
+  <p class="lead">
+    パスキー（WebAuthn）でログインした人だけが、みんなで共有している電気のスイッチを切り替えられます。
+    スマホなら顔や指紋、PC なら Windows Hello などで本人確認します。
+  </p>
+
+  <section class="card">
+    <h2>みんなの電気</h2>
+    <div class="light">
+      <div class="bulb" id="bulb" aria-hidden="true"></div>
+      <div>
+        <div class="state" id="state">…</div>
+        <div class="note" id="lastBy"></div>
+        <div class="row">
+          <button class="toggle" id="toggle" aria-label="スイッチ" disabled></button>
+          <span class="note" id="toggleHint">ログインすると切り替えられます</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="loggedOut">
+    <h2>ログイン / 新規登録</h2>
+    <div class="row">
+      <input type="text" id="user" placeholder="ユーザー名" autocomplete="username webauthn" maxlength="64">
+    </div>
+    <div class="row">
+      <button class="primary" id="btnLogin">パスキーでログイン</button>
+      <button id="btnSignup">この名前で新規登録</button>
+    </div>
+    <p class="note">ログインはユーザー名を空のままでもできます（端末に保存されたパスキーから選びます）。</p>
+    <div class="msg" id="msgOut"></div>
+  </section>
+
+  <section class="card hidden" id="loggedIn">
+    <h2>サーバが保存しているもの</h2>
+    <p class="note">
+      パスキー 1 つにつき、公開鍵とその付帯情報だけを保存しています。
+      顔や指紋のデータ、秘密鍵、パスワードは端末から出てこないので、ここにはありません。
+    </p>
+    <div id="keys"></div>
+    <div class="row">
+      <button id="btnAdd">この端末のパスキーを追加</button>
+      <button id="btnLogout">ログアウト</button>
+    </div>
+    <div class="msg" id="msgIn"></div>
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>最後の通信（ブラウザとサーバのやりとり）</summary>
+      <pre id="log">まだありません</pre>
+    </details>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const TOKEN_KEY = "access_token";
+let token = "";
+try { token = sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) {}
+
+const $ = (id) => document.getElementById(id);
+
+// ---------- base64url <-> ArrayBuffer ----------
+function b64uToBuf(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const b = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+  return b.buffer;
+}
+function bufToB64u(buf) {
+  const b = new Uint8Array(buf);
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// サーバの options（JSON）を navigator.credentials に渡せる形にする
+function toCreateOptions(pk) {
+  if (window.PublicKeyCredential && PublicKeyCredential.parseCreationOptionsFromJSON) {
+    return PublicKeyCredential.parseCreationOptionsFromJSON(pk);
+  }
+  const o = structuredClone(pk);
+  o.challenge = b64uToBuf(pk.challenge);
+  o.user.id = b64uToBuf(pk.user.id);
+  o.excludeCredentials = (pk.excludeCredentials || []).map(c => ({ ...c, id: b64uToBuf(c.id) }));
+  return o;
+}
+function toGetOptions(pk) {
+  if (window.PublicKeyCredential && PublicKeyCredential.parseRequestOptionsFromJSON) {
+    return PublicKeyCredential.parseRequestOptionsFromJSON(pk);
+  }
+  const o = structuredClone(pk);
+  o.challenge = b64uToBuf(pk.challenge);
+  o.allowCredentials = (pk.allowCredentials || []).map(c => ({ ...c, id: b64uToBuf(c.id) }));
+  return o;
+}
+
+// 認証器の応答をサーバに送る JSON（PublicKeyCredential.toJSON() と同じ形）にする
+function credToJSON(cred) {
+  const r = cred.response;
+  const out = {
+    id: cred.id,
+    rawId: bufToB64u(cred.rawId),
+    type: cred.type,
+    authenticatorAttachment: cred.authenticatorAttachment || null,
+    clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    response: { clientDataJSON: bufToB64u(r.clientDataJSON) },
+  };
+  if (r.attestationObject) {
+    out.response.attestationObject = bufToB64u(r.attestationObject);
+    out.response.transports = r.getTransports ? r.getTransports() : [];
+  } else {
+    out.response.authenticatorData = bufToB64u(r.authenticatorData);
+    out.response.signature = bufToB64u(r.signature);
+    out.response.userHandle = r.userHandle ? bufToB64u(r.userHandle) : null;
+  }
+  return out;
+}
+
+// ---------- API ----------
+const logLines = [];
+function log(title, obj) {
+  logLines.push("// " + title + "\n" + JSON.stringify(obj, null, 2));
+  while (logLines.length > 4) logLines.shift();
+  $("log").textContent = logLines.join("\n\n");
+}
+
+async function api(path, body, withToken) {
+  const h = { "Content-Type": "application/json" };
+  if (withToken && token) h.Authorization = "Bearer " + token;
+  const res = await fetch(path, { method: "POST", headers: h, body: JSON.stringify(body || {}) });
+  const j = await res.json();
+  if (path.indexOf("/switch/v0/get") < 0) {
+    log("→ " + path, body || {});
+    log("← " + path, j);
+  }
+  return j;
+}
+
+function setToken(t) {
+  token = t || "";
+  try {
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch (e) {}
+}
+
+function showMsg(id, text, kind) {
+  const el = $(id);
+  el.textContent = text || "";
+  el.className = "msg" + (kind ? " " + kind : "");
+}
+
+// WebAuthn のエラーを人が読める文に
+function webauthnError(e) {
+  if (!e) return "失敗しました";
+  if (e.name === "NotAllowedError") return "キャンセルされたか、時間切れになりました";
+  if (e.name === "InvalidStateError") return "このパスキーはもう登録されています";
+  if (e.name === "SecurityError") return "このページのドメインではパスキーを使えません（https か localhost が必要です）";
+  return e.message || String(e);
+}
+
+function supported() {
+  return window.isSecureContext && window.PublicKeyCredential && navigator.credentials;
+}
+
+// ---------- 登録 / ログイン ----------
+async function register(mode) {
+  const msgId = mode === "add" ? "msgIn" : "msgOut";
+  if (!supported()) return showMsg(msgId, "このブラウザ（またはこの URL）ではパスキーを使えません", "err");
+  const body = mode === "add" ? {} : { user: $("user").value.trim() };
+  const o = await api("/api/passkey/v0/register_options", body, mode === "add");
+  if (o.status !== "success") return showMsg(msgId, "登録できません: " + o.message, "err");
+  let cred;
+  try {
+    showMsg(msgId, "端末の指示に従ってください…");
+    cred = await navigator.credentials.create({ publicKey: toCreateOptions(o.publicKey) });
+  } catch (e) {
+    return showMsg(msgId, webauthnError(e), "err");
+  }
+  const payload = credToJSON(cred);
+  payload.name = deviceName();
+  const r = await api("/api/passkey/v0/register_verify", payload, mode === "add");
+  if (r.status !== "success") return showMsg(msgId, "サーバが受け付けませんでした: " + r.message, "err");
+  if (r.access_token) setToken(r.access_token);
+  showMsg("msgOut", "");
+  await refreshMe();
+  showMsg("msgIn", mode === "add" ? "パスキーを追加しました" : "登録してログインしました", "ok");
+}
+
+async function login() {
+  if (!supported()) return showMsg("msgOut", "このブラウザ（またはこの URL）ではパスキーを使えません", "err");
+  const user = $("user").value.trim();
+  const o = await api("/api/passkey/v0/login_options", user ? { user } : {});
+  if (o.status !== "success") return showMsg("msgOut", "ログインできません: " + o.message, "err");
+  if (user && o.publicKey.allowCredentials.length === 0) {
+    return showMsg("msgOut", "その名前のパスキーは登録されていません", "err");
+  }
+  let cred;
+  try {
+    showMsg("msgOut", "端末の指示に従ってください…");
+    cred = await navigator.credentials.get({ publicKey: toGetOptions(o.publicKey) });
+  } catch (e) {
+    return showMsg("msgOut", webauthnError(e), "err");
+  }
+  const r = await api("/api/passkey/v0/login_verify", credToJSON(cred));
+  if (r.status !== "success") return showMsg("msgOut", "ログインできませんでした: " + r.message, "err");
+  setToken(r.access_token);
+  showMsg("msgOut", "");
+  await refreshMe();
+  showMsg("msgIn", "ログインしました", "ok");
+}
+
+function deviceName() {
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/iPad/.test(ua)) return "iPad";
+  if (/Android/.test(ua)) return "Android";
+  if (/Windows/.test(ua)) return "Windows";
+  if (/Mac OS X/.test(ua)) return "Mac";
+  if (/Linux/.test(ua)) return "Linux";
+  return "passkey";
+}
+
+// ---------- 画面 ----------
+function utcToLocal(s) {
+  if (!s) return "";
+  const d = new Date(s.replace(" ", "T") + "Z");
+  return isNaN(d) ? s : d.toLocaleString();
+}
+
+let me = "";
+
+async function refreshMe() {
+  me = "";
+  if (token) {
+    const r = await api("/api/passkey/v0/me", {}, true);
+    if (r.status === "success") me = r.user;
+    else setToken("");
+  }
+  $("loggedOut").classList.toggle("hidden", !!me);
+  $("loggedIn").classList.toggle("hidden", !me);
+  $("who").innerHTML = "";
+  if (me) {
+    const b = document.createElement("b");
+    b.textContent = me;
+    $("who").append(b, " でログイン中");
+  } else {
+    $("who").textContent = "ログインしていません";
+  }
+  $("toggle").disabled = !me;
+  $("toggleHint").textContent = me ? "押すとみんなの電気が切り替わります" : "ログインすると切り替えられます";
+  if (me) await refreshKeys();
+}
+
+const LABELS = {
+  credential_id: "credential ID",
+  public_key: "公開鍵 (COSE)",
+  alg: "アルゴリズム",
+  user_handle: "user handle",
+  sign_count: "署名カウンタ",
+  transports: "transports",
+  backup_eligible: "同期できる",
+  backed_up: "同期済み",
+  aaguid: "AAGUID",
+  last_used_at: "最後に使った",
+  created_at: "登録した",
+};
+
+async function refreshKeys() {
+  const r = await api("/api/passkey/v0/list", {}, true);
+  const box = $("keys");
+  box.innerHTML = "";
+  if (r.status !== "success") return;
+  for (const p of r.passkey_list) {
+    const div = document.createElement("div");
+    div.className = "key";
+    const head = document.createElement("div");
+    head.className = "key-head";
+    const name = document.createElement("b");
+    name.textContent = p.name;
+    const del = document.createElement("button");
+    del.className = "danger";
+    del.textContent = "削除";
+    del.onclick = () => deleteKey(p, r.passkey_list.length);
+    head.append(name, del);
+    const table = document.createElement("table");
+    for (const k of Object.keys(LABELS)) {
+      let v = p[k];
+      if (k === "alg") v = v === -7 ? "-7 (ES256)" : v === -257 ? "-257 (RS256)" : v;
+      if (k === "transports") v = v.join(", ");
+      if (k === "backup_eligible" || k === "backed_up") v = v ? "はい" : "いいえ";
+      if (k === "last_used_at" || k === "created_at") v = utcToLocal(v);
+      const tr = document.createElement("tr");
+      const th = document.createElement("th");
+      th.textContent = LABELS[k];
+      const td = document.createElement("td");
+      const code = document.createElement("code");
+      code.textContent = v == null || v === "" ? "—" : String(v);
+      td.append(code);
+      tr.append(th, td);
+      table.append(tr);
+    }
+    div.append(head, table);
+    box.append(div);
+  }
+}
+
+async function deleteKey(p, count) {
+  const warn = count <= 1
+    ? "最後のパスキーです。消すとこのアカウントには二度とログインできません。消しますか？"
+    : "「" + p.name + "」を消しますか？（端末側のパスキーは残るので、端末の設定からも消してください）";
+  if (!confirm(warn)) return;
+  const r = await api("/api/passkey/v0/delete", { credential_id: p.credential_id }, true);
+  if (r.status !== "success") return showMsg("msgIn", "削除できません: " + r.message, "err");
+  // 端末側にも「このパスキーはもう無い」と伝える（対応ブラウザのみ）
+  try {
+    if (PublicKeyCredential.signalUnknownCredential) {
+      await PublicKeyCredential.signalUnknownCredential({ rpId: location.hostname, credentialId: p.credential_id });
+    }
+  } catch (e) {}
+  if (count <= 1) {
+    await api("/api/passkey/v0/logout", {}, true);
+    setToken("");
+  }
+  await refreshMe();
+  showMsg(count <= 1 ? "msgOut" : "msgIn", "削除しました", "ok");
+}
+
+async function logout() {
+  await api("/api/passkey/v0/logout", {}, true);
+  setToken("");
+  await refreshMe();
+}
+
+// ---------- スイッチ ----------
+let switchOn = false;
+function renderSwitch(s) {
+  if (s.status !== "success") return;
+  switchOn = s.on;
+  $("bulb").classList.toggle("on", s.on);
+  $("toggle").classList.toggle("on", s.on);
+  $("toggle").setAttribute("aria-pressed", s.on ? "true" : "false");
+  $("state").textContent = s.on ? "ついています" : "消えています";
+  $("lastBy").textContent = s.updated_by
+    ? "最後に切り替えた人: " + s.updated_by + "（" + utcToLocal(s.updated_at) + "）"
+    : "まだ誰も触っていません";
+}
+
+async function pollSwitch() {
+  try { renderSwitch(await api("/api/switch/v0/get", {})); } catch (e) {}
+}
+
+async function toggleSwitch() {
+  $("toggle").disabled = true;
+  const r = await api("/api/switch/v0/set", { on: !switchOn }, true);
+  if (r.status === "success") renderSwitch(r);
+  else if (r.message === "not logged in") { setToken(""); await refreshMe(); }
+  $("toggle").disabled = !me;
+}
+
+// ---------- 起動 ----------
+$("btnSignup").onclick = () => register("signup");
+$("btnLogin").onclick = login;
+$("btnAdd").onclick = () => register("add");
+$("btnLogout").onclick = logout;
+$("toggle").onclick = toggleSwitch;
+$("user").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+
+if (!supported()) {
+  showMsg("msgOut", window.isSecureContext
+    ? "このブラウザはパスキーに対応していません"
+    : "パスキーは https か localhost でしか使えません（いまの URL: " + location.origin + "）", "err");
+}
+
+refreshMe();
+pollSwitch();
+setInterval(pollSwitch, 2000);
+</script>
+</body>
+</html>

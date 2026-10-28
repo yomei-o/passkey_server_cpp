@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+export AWS_LWA_ENABLE_COMPRESSION=true
+export AWS_LWA_READINESS_CHECK_PATH=/health
+export AWS_LWA_LOG_LEVEL=info
+
+# Web Adapter 起動（裏）
+./lambda-adapter &
+
+# C++ HTTP サーバ起動（フォアグラウンド）
+exec ./lambda_server
+
