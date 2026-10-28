@@ -50,6 +50,19 @@ class PasskeyChallenge(Base):
     created_at = Column(DateTime, server_default=func.current_timestamp())
 
 
+# アカウント。status は "approved"（承認済み）/ "pending"（承認待ち）
+#   最初の 1 人は登録した時点で approved、2 人目からは承認済みの誰かが approve する
+class Account(Base):
+    __tablename__ = "account"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="ID")
+    user = Column(Text, nullable=False)
+    status = Column(Text, nullable=False)
+    approved_by = Column(Text)
+    approved_at = Column(DateTime)
+    created_at = Column(DateTime)
+
+
 # ログイン中のセッション。skey が Bearer トークン、expire は naive な UTC
 class Session(Base):
     __tablename__ = "session"

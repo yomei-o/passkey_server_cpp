@@ -5,7 +5,8 @@
 - C++ 版は、ほぼヘッダオンリーのライブラリだけで書いています。`main/lambda_server.cpp` を 1 つコンパイルすれば動きます。署名検証には同梱の mbedtls を使います。
 - Python 版は FastAPI + SQLAlchemy で書いています。署名検証には cryptography を使います。
 - DB は SQLite（既定）と MySQL を切り替えられます。
-- デモとして「**みんなの電気のスイッチ**」が付いています。パスキーでログインした人だけがオン・オフを切り替えられ、状態は全員に共有されます。
+- デモとして「**みんなの電気のスイッチ**」が付いています。パスキーでログインした承認済みのメンバーだけがオン・オフを切り替えられ、状態は全員に共有されます。
+- **最初に登録した人は自動で承認**されます。2 人目からは登録・ログインはできるものの承認待ちになり、承認済みのメンバーが「許可」するまでスイッチを触れません。承認済みのメンバーは、自分以外のアカウントを削除できます（承認待ちの人を消せば却下）。
 
 ```
 ブラウザ                                   サーバ
@@ -80,10 +81,12 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 |---|---|
 | `passkey` | パスキー 1 つにつき 1 行。`user` / `credential_id` / `user_handle` / `public_key`（COSE_Key を base64url） / `alg` / `sign_count` / `transports` / `backup_eligible` / `backed_up` / `aaguid` / `name` / `last_used_at` |
 | `passkey_challenge` | 発行したチャレンジ。検証に来たら成否にかかわらず消す（使い回し防止）。5 分で失効 |
-| `session` | ログイン中のトークン（`skey`）。24 時間で失効 |
+| `account` | アカウント 1 つにつき 1 行。`status` は `approved` / `pending`、`approved_by` / `approved_at` |
+| `session` | ログイン中のトークン（`skey`）。24 時間で失効。アカウントが消えると無効 |
 | `switch_state` | デモのスイッチ（`value` / `updated_by` / `updated_at`） |
 
-- アカウントは「同じ `user` を持つパスキーの集まり」です。パスワードはありません。
+- パスワードはありません。アカウントの最後のパスキーを消すと、アカウントごと消えます（退会）。
+- `account` テーブルが無かった頃の DB で起動すると、パスキーを持っているユーザーは承認済みとして引き継がれます。
 - `user_handle` は認証器に渡す `user.id` です。アカウントごとにランダムな 32 バイトで、個人情報は入れていません。
 - 時刻はすべて naive な UTC（`YYYY-MM-DD HH:MM:SS`）で保存します。C++ 版と Python 版が同じ DB を読めます。
 
@@ -100,12 +103,15 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | `/api/passkey/v0/register_verify` | 任意 | `credential.toJSON()` の形 + `name` → `{user, passkey}`。新規アカウントなら `access_token` も返す |
 | `/api/passkey/v0/login_options` | 不要 | `{user?}` → `{publicKey}`（`user` を省くと `allowCredentials` が空になり、端末のパスキーから選ぶ） |
 | `/api/passkey/v0/login_verify` | 不要 | `credential.toJSON()` の形 → `{user, access_token}` |
-| `/api/passkey/v0/me` | 要 | → `{user, expire}` |
+| `/api/passkey/v0/me` | 要 | → `{user, approved, expire}`（`register_verify` / `login_verify` も `approved` を返す） |
 | `/api/passkey/v0/logout` | 要 | このトークンのセッションを消す |
 | `/api/passkey/v0/list` | 要 | 自分のパスキー一覧 → `{user, passkey_list, columns, total_count}` |
-| `/api/passkey/v0/delete` | 要 | `{credential_id}`。最後の 1 本を消すと、そのアカウントには入れなくなる |
+| `/api/passkey/v0/delete` | 要 | `{credential_id}` → `{account_deleted}`。最後の 1 本ならアカウントごと消える |
+| `/api/account/v0/list` | 承認済み | 全アカウント → `{account_list: [{user, status, approved_by, approved_at, created_at, passkey_count}]}` |
+| `/api/account/v0/approve` | 承認済み | `{user}` で承認待ちを承認する → `{account}` |
+| `/api/account/v0/delete` | 承認済み | `{user}` で自分以外のアカウントを消す（パスキーとセッションも消える） |
 | `/api/switch/v0/get` | 不要 | → `{on, updated_by, updated_at}` |
-| `/api/switch/v0/set` | 要 | `{on: true/false}` → `{on, updated_by, updated_at}` |
+| `/api/switch/v0/set` | 承認済み | `{on: true/false}` → `{on, updated_by, updated_at}` |
 
 ### 検証していること（失敗時の `message`）
 
@@ -127,7 +133,9 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | | 署名カウンタが増えているか（どちらも 0 なら見ない） | `sign count did not increase` |
 | その他 | 壊れた base64 / JSON / CBOR | `invalid request` |
 | | ユーザ名が 1〜64 バイトで制御文字を含まないか | `invalid user name` |
-| | トークンが無効・期限切れ | `not logged in` |
+| | トークンが無効・期限切れ・アカウントが消えた | `not logged in` |
+| アカウント | 承認待ちのユーザーが承認済み限定の API を呼んだ | `not approved` |
+| | 存在しない / 承認済み / 自分自身 | `unknown account` / `already approved` / `cannot delete yourself` |
 
 ### やっていないこと
 
@@ -195,7 +203,7 @@ python ../../tests/cpp/test_passkey.py
 python tests/browser_e2e.py http://localhost:8099
 ```
 
-`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系も確認します（C++ / Python とも 103 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、新規登録 → スイッチ → ログアウト → ユーザー名なしログイン → 別ブラウザへの反映 → 削除までを画面から通します。
+`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系、承認と削除も確認します（C++ / Python とも 137 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、1 人目の登録（自動承認）→ スイッチ → 2 人目の登録（承認待ち）→ 1 人目が許可 → 2 人目がスイッチ → 1 人目が 2 人目を削除 → ログアウト・ログイン → 退会までを画面から通します。**DB が空のサーバ**に対して実行してください。
 
 ---
 

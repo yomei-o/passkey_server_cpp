@@ -5,7 +5,7 @@
 // みんなの電気のスイッチ（パスキーでログインした人だけが切り替えられる）
 //
 //   /api/switch/v0/get    いまの状態。誰でも見られる
-//   /api/switch/v0/set    {on: true/false} で切り替える。要ログイン
+//   /api/switch/v0/set    {on: true/false} で切り替える。承認済みのアカウントでログインしていること
 //
 // Python 版は python/testsv_api_switch.py。
 //
@@ -45,7 +45,7 @@ namespace switch_api {
     static inline json switch_set(sql::connection& db, const json& body,
                                   const std::string& skey, const Request& req)
     {
-        std::string user = session_user(db, skey);
+        std::string user = approved_user(db, skey);
         if (!body.contains("on") || !body["on"].is_boolean()) throw PasskeyError("invalid request");
         int value = body["on"].get<bool>() ? 1 : 0;
         std::string now = time_to_db(time(NULL));

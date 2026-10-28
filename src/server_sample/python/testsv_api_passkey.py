@@ -8,7 +8,14 @@
 #   /api/passkey/v0/me                 トークンの確認
 #   /api/passkey/v0/logout             セッションを消す
 #   /api/passkey/v0/list               自分のパスキー一覧（サーバが何を保存しているか）
-#   /api/passkey/v0/delete             自分のパスキーを削除
+#   /api/passkey/v0/delete             自分のパスキーを削除（最後の 1 本ならアカウントごと消える）
+#
+#   /api/account/v0/list               全アカウントの一覧（承認済みの人だけ）
+#   /api/account/v0/approve            承認待ちのアカウントを承認する（承認済みの人だけ）
+#   /api/account/v0/delete             自分以外のアカウントを消す（承認済みの人だけ。承認待ちを消せば却下）
+#
+# 最初の 1 人は登録した時点で承認済み。2 人目からは登録・ログインはできるが承認待ちで、
+# 承認済みの誰かが approve するまでスイッチを触れない。
 #
 # C++ 版は cpp/main/testsv_api_passkey.h。検査の順番と失敗時の message を揃えてある。
 #
@@ -69,9 +76,24 @@ PASSKEY_COLUMNS = [
 ]
 
 
+ACCOUNT_APPROVED = "approved"
+ACCOUNT_PENDING = "pending"
+
+
 def init_passkey():
     print("init_passkey()")
     model_passkey.Base.metadata.create_all(bind=engine)
+    # account テーブルが無かった頃に登録した人は、承認済みのアカウントとして引き継ぐ
+    db = SessionLocal()
+    try:
+        users = {u for (u,) in db.query(model_passkey.Passkey.user).distinct()}
+        have = {u for (u,) in db.query(model_passkey.Account.user)}
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        for u in sorted(users - have):
+            db.add(model_passkey.Account(user=u, status=ACCOUNT_APPROVED, created_at=now))
+        db.commit()
+    finally:
+        db.close()
 
 init_passkey()
 
@@ -395,6 +417,9 @@ def get_session(db: Session, skey: str):
     s = db.query(model_passkey.Session).filter(model_passkey.Session.skey == skey).first()
     if s is None or s.expire < utcnow():
         return None
+    # アカウントが消されていればそのトークンも無効
+    if get_account(db, s.user) is None:
+        return None
     return s
 
 
@@ -403,6 +428,45 @@ def session_user(db: Session, skey: str) -> str:
     if s is None:
         raise PasskeyError("not logged in")
     return s.user
+
+
+#
+# account
+#
+
+def get_account(db: Session, user: str):
+    return db.query(model_passkey.Account).filter(model_passkey.Account.user == user).first()
+
+
+def is_approved(db: Session, user: str) -> bool:
+    a = get_account(db, user)
+    return a is not None and a.status == ACCOUNT_APPROVED
+
+
+# 承認済みのユーザだけが使える API の入口
+def approved_user(db: Session, skey: str) -> str:
+    user = session_user(db, skey)
+    if not is_approved(db, user):
+        raise PasskeyError("not approved")
+    return user
+
+
+def delete_account(db: Session, user: str):
+    db.query(model_passkey.Passkey).filter(model_passkey.Passkey.user == user).delete()
+    db.query(model_passkey.Session).filter(model_passkey.Session.user == user).delete()
+    db.query(model_passkey.Account).filter(model_passkey.Account.user == user).delete()
+    db.commit()
+
+
+def account_to_dict(db: Session, a) -> dict:
+    return {
+        "user": a.user,
+        "status": a.status,
+        "approved_by": a.approved_by,
+        "approved_at": format_time(a.approved_at),
+        "created_at": format_time(a.created_at),
+        "passkey_count": len(get_user_passkeys(db, a.user)),
+    }
 
 
 #
@@ -472,9 +536,9 @@ def passkey_register_options(db: Session, skey: str, body: dict, request: Reques
         user = body.get("user")
         if not valid_user_name(user):
             raise PasskeyError("invalid user name")
-    rows = get_user_passkeys(db, user)
-    if not skey and rows:
+    if not skey and get_account(db, user) is not None:
         raise PasskeyError("user already exists")
+    rows = get_user_passkeys(db, user)
     # 認証器に渡す user.id。アカウントごとに 1 つ、最初の登録時にランダムに作る
     # （ユーザ名などの個人情報は入れない）
     handle = rows[0].user_handle if rows else b64url_encode(secrets.token_bytes(32))
@@ -514,7 +578,7 @@ def passkey_register_verify(db: Session, skey: str, body: dict, request: Request
     if skey:
         if ch["user"] != login_user:
             raise PasskeyError("challenge user mismatch")
-    elif get_user_passkeys(db, ch["user"]):
+    elif get_account(db, ch["user"]) is not None:
         # options の後で同じ名前が先に登録された
         raise PasskeyError("user already exists")
     check_origin(cd, request)
@@ -553,11 +617,22 @@ def passkey_register_verify(db: Session, skey: str, body: dict, request: Request
         created_at=utcnow(),
     )
     db.add(p)
+    if not skey:
+        # 新規アカウント。承認済みの人がまだ誰もいなければ（＝最初の 1 人）そのまま承認済み
+        first = db.query(model_passkey.Account).filter(
+            model_passkey.Account.status == ACCOUNT_APPROVED).first() is None
+        db.add(model_passkey.Account(
+            user=ch["user"],
+            status=ACCOUNT_APPROVED if first else ACCOUNT_PENDING,
+            approved_by=ch["user"] if first else None,
+            approved_at=utcnow() if first else None,
+            created_at=utcnow()))
     db.commit()
     db.refresh(p)
-    res = {"status": "success", "user": ch["user"], "passkey": passkey_to_dict(p)}
+    res = {"status": "success", "user": ch["user"], "approved": is_approved(db, ch["user"]),
+           "passkey": passkey_to_dict(p)}
     if not skey:
-        # 新規アカウントはそのままログイン状態にする
+        # 新規アカウントはそのままログイン状態にする（承認待ちでもログインはできる）
         res["access_token"] = create_session(db, ch["user"])
     return res
 
@@ -615,14 +690,16 @@ def passkey_login_verify(db: Session, body: dict, request: Request) -> dict:
     p.backed_up = 1 if ad["flags"] & FLAG_BS else 0
     p.last_used_at = utcnow()
     db.commit()
-    return {"status": "success", "user": p.user, "access_token": create_session(db, p.user)}
+    return {"status": "success", "user": p.user, "approved": is_approved(db, p.user),
+            "access_token": create_session(db, p.user)}
 
 
 def passkey_me(db: Session, skey: str) -> dict:
     s = get_session(db, skey)
     if s is None:
         raise PasskeyError("not logged in")
-    return {"status": "success", "user": s.user, "expire": format_time(s.expire)}
+    return {"status": "success", "user": s.user, "approved": is_approved(db, s.user),
+            "expire": format_time(s.expire)}
 
 
 def passkey_logout(db: Session, skey: str) -> dict:
@@ -646,7 +723,7 @@ def passkey_list(db: Session, skey: str) -> dict:
     }
 
 
-# 最後の 1 本を消すとそのアカウントには二度と入れなくなる（＝退会）
+# 最後の 1 本を消すとそのアカウントには二度と入れないので、アカウントごと消す（＝退会）
 def passkey_delete(db: Session, skey: str, body: dict) -> dict:
     user = session_user(db, skey)
     cred_id = body.get("credential_id")
@@ -657,7 +734,52 @@ def passkey_delete(db: Session, skey: str, body: dict) -> dict:
         raise PasskeyError("unknown credential")
     db.delete(p)
     db.commit()
-    return {"status": "success", "credential_id": cred_id}
+    account_deleted = not get_user_passkeys(db, user)
+    if account_deleted:
+        delete_account(db, user)
+    return {"status": "success", "credential_id": cred_id, "account_deleted": account_deleted}
+
+
+def account_list(db: Session, skey: str) -> dict:
+    user = approved_user(db, skey)
+    rows = db.query(model_passkey.Account).order_by(model_passkey.Account.id).all()
+    return {
+        "status": "success",
+        "user": user,
+        "account_list": [account_to_dict(db, a) for a in rows],
+        "total_count": len(rows),
+    }
+
+
+def account_approve(db: Session, skey: str, body: dict) -> dict:
+    user = approved_user(db, skey)
+    target = body.get("user")
+    if not isinstance(target, str) or not target:
+        raise PasskeyError("invalid request")
+    a = get_account(db, target)
+    if a is None:
+        raise PasskeyError("unknown account")
+    if a.status == ACCOUNT_APPROVED:
+        raise PasskeyError("already approved")
+    a.status = ACCOUNT_APPROVED
+    a.approved_by = user
+    a.approved_at = utcnow()
+    db.commit()
+    return {"status": "success", "account": account_to_dict(db, a)}
+
+
+# 自分以外のアカウントを消す。自分のは passkey/delete で最後の 1 本を消す（退会）
+def account_delete(db: Session, skey: str, body: dict) -> dict:
+    user = approved_user(db, skey)
+    target = body.get("user")
+    if not isinstance(target, str) or not target:
+        raise PasskeyError("invalid request")
+    if target == user:
+        raise PasskeyError("cannot delete yourself")
+    if get_account(db, target) is None:
+        raise PasskeyError("unknown account")
+    delete_account(db, target)
+    return {"status": "success", "user": target}
 
 
 #
@@ -751,3 +873,29 @@ async def api_passkey_delete(request: Request,
     ):
     body = await read_body(request)
     return run(db, passkey_delete, extract_bearer_token(authorization), body)
+
+
+@router.post("/account/v0/list")
+async def api_account_list(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    return run(db, account_list, extract_bearer_token(authorization))
+
+
+@router.post("/account/v0/approve")
+async def api_account_approve(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    body = await read_body(request)
+    return run(db, account_approve, extract_bearer_token(authorization), body)
+
+
+@router.post("/account/v0/delete")
+async def api_account_delete(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    body = await read_body(request)
+    return run(db, account_delete, extract_bearer_token(authorization), body)

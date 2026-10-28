@@ -2,7 +2,7 @@
 # みんなの電気のスイッチ（パスキーでログインした人だけが切り替えられる）
 #
 #   /api/switch/v0/get    いまの状態。誰でも見られる
-#   /api/switch/v0/set    {on: true/false} で切り替える。要ログイン
+#   /api/switch/v0/set    {on: true/false} で切り替える。承認済みのアカウントでログインしていること
 #
 # C++ 版は cpp/main/testsv_api_switch.h。
 #
@@ -18,7 +18,7 @@ from testsv_api_passkey import (
     get_db,
     read_body,
     run,
-    session_user,
+    approved_user,
     utcnow,
 )
 
@@ -55,7 +55,7 @@ def switch_get(db: Session) -> dict:
 
 
 def switch_set(db: Session, skey: str, body: dict) -> dict:
-    user = session_user(db, skey)
+    user = approved_user(db, skey)
     on = body.get("on")
     if not isinstance(on, bool):
         raise PasskeyError("invalid request")

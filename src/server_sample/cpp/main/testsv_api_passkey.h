@@ -11,7 +11,14 @@
 //   /api/passkey/v0/me                 トークンの確認
 //   /api/passkey/v0/logout             セッションを消す
 //   /api/passkey/v0/list               自分のパスキー一覧（サーバが何を保存しているか）
-//   /api/passkey/v0/delete             自分のパスキーを削除
+//   /api/passkey/v0/delete             自分のパスキーを削除（最後の 1 本ならアカウントごと消える）
+//
+//   /api/account/v0/list               全アカウントの一覧（承認済みの人だけ）
+//   /api/account/v0/approve            承認待ちのアカウントを承認する（承認済みの人だけ）
+//   /api/account/v0/delete             自分以外のアカウントを消す（承認済みの人だけ。承認待ちを消せば却下）
+//
+// 最初の 1 人は登録した時点で承認済み。2 人目からは登録・ログインはできるが承認待ちで、
+// 承認済みの誰かが approve するまでスイッチを触れない。
 //
 // Python 版は python/testsv_api_passkey.py。検査の順番と失敗時の message を揃えてある。
 // 署名検証は同梱の mbedtls（mbedtlspp.hpp）。
@@ -53,6 +60,9 @@ namespace passkey {
     static const int FLAG_BE = 0x08;
     static const int FLAG_BS = 0x10;
     static const int FLAG_AT = 0x40;
+
+    static const char* const ACCOUNT_APPROVED = "approved";
+    static const char* const ACCOUNT_PENDING = "pending";
 
     static const char* const PASSKEY_COLUMNS[] = {
         "user", "name", "credential_id", "user_handle", "alg", "public_key", "sign_count",
@@ -565,6 +575,44 @@ namespace passkey {
     }
 
     //
+    // account（一覧などは passkey テーブルの後ろ）
+    //
+
+    struct AccountRow {
+        int64_t id = -1;
+        std::string user, status, approved_by, approved_at, created_at;
+        bool approved_by_null = true;
+    };
+
+    static inline bool get_account(sql::connection& db, const std::string& user, AccountRow& out)
+    {
+        const auto tab = test::passkey::Account{};
+        for (const auto& a : db(select(all_of(tab)).from(tab).where(tab.user == user))) {
+            out.id = a.id;
+            out.user = a.user.value();
+            out.status = a.status.value();
+            out.approved_by_null = a.approvedBy.is_null();
+            out.approved_by = a.approvedBy.value();
+            out.approved_at = a.approvedAt.value();
+            out.created_at = a.createdAt.value();
+            return true;
+        }
+        return false;
+    }
+
+    static inline bool account_exists(sql::connection& db, const std::string& user)
+    {
+        AccountRow a;
+        return get_account(db, user, a);
+    }
+
+    static inline bool is_approved(sql::connection& db, const std::string& user)
+    {
+        AccountRow a;
+        return get_account(db, user, a) && a.status == ACCOUNT_APPROVED;
+    }
+
+    //
     // session
     //
 
@@ -598,6 +646,8 @@ namespace passkey {
             s.expire = a.expire.value();
             break;
         }
+        // アカウントが消されていればそのトークンも無効
+        if (s.id >= 0 && !account_exists(db, s.user)) s = SessionInfo();
         return s;
     }
 
@@ -606,6 +656,14 @@ namespace passkey {
         SessionInfo s = get_session(db, skey);
         if (s.id < 0) throw PasskeyError("not logged in");
         return s.user;
+    }
+
+    // 承認済みのユーザだけが使える API の入口
+    static inline std::string approved_user(sql::connection& db, const std::string& skey)
+    {
+        std::string user = session_user(db, skey);
+        if (!is_approved(db, user)) throw PasskeyError("not approved");
+        return user;
     }
 
     //
@@ -700,6 +758,28 @@ namespace passkey {
         return d;
     }
 
+    static inline void delete_account(sql::connection& db, const std::string& user)
+    {
+        const auto ptab = test::passkey::Passkey{};
+        const auto stab = test::passkey::Session{};
+        const auto atab = test::passkey::Account{};
+        db(remove_from(ptab).where(ptab.user == user));
+        db(remove_from(stab).where(stab.user == user));
+        db(remove_from(atab).where(atab.user == user));
+    }
+
+    static inline json account_to_json(sql::connection& db, const AccountRow& a)
+    {
+        json o = json::object();
+        o["user"] = a.user;
+        o["status"] = a.status;
+        o["approved_by"] = a.approved_by_null ? json(nullptr) : json(a.approved_by);
+        o["approved_at"] = format_time(a.approved_at);
+        o["created_at"] = format_time(a.created_at);
+        o["passkey_count"] = get_user_passkeys(db, a.user).size();
+        return o;
+    }
+
     // ユーザ名は 1〜64 バイト、制御文字なし
     static inline bool valid_user_name(const json& j)
     {
@@ -729,8 +809,8 @@ namespace passkey {
             if (!body.contains("user") || !valid_user_name(body["user"])) throw PasskeyError("invalid user name");
             user = body["user"];
         }
+        if (skey == "" && account_exists(db, user)) throw PasskeyError("user already exists");
         std::vector<PasskeyRow> rows = get_user_passkeys(db, user);
-        if (skey == "" && !rows.empty()) throw PasskeyError("user already exists");
         // 認証器に渡す user.id。アカウントごとに 1 つ、最初の登録時にランダムに作る
         // （ユーザ名などの個人情報は入れない）
         std::string handle = rows.empty() ? b64url_encode(random_bytes(32)) : rows[0].user_handle;
@@ -776,7 +856,7 @@ namespace passkey {
         if (skey != "") {
             if (ch.user != login_user) throw PasskeyError("challenge user mismatch");
         }
-        else if (!get_user_passkeys(db, ch.user).empty()) {
+        else if (account_exists(db, ch.user)) {
             // options の後で同じ名前が先に登録された
             throw PasskeyError("user already exists");
         }
@@ -813,15 +893,29 @@ namespace passkey {
             tab.backupEligible = (ad.flags & FLAG_BE) ? 1 : 0, tab.backedUp = (ad.flags & FLAG_BS) ? 1 : 0,
             tab.aaguid = format_aaguid(ad.aaguid), tab.name = name,
             tab.createdAt = now, tab.updatedAt = now));
+        if (skey == "") {
+            // 新規アカウント。承認済みの人がまだ誰もいなければ（＝最初の 1 人）そのまま承認済み
+            const auto atab = test::passkey::Account{};
+            bool first = db(select(atab.id).from(atab).where(atab.status == ACCOUNT_APPROVED)).empty();
+            if (first) {
+                db(insert_into(atab).set(atab.user = ch.user, atab.status = ACCOUNT_APPROVED,
+                    atab.approvedBy = ch.user, atab.approvedAt = now, atab.createdAt = now));
+            }
+            else {
+                db(insert_into(atab).set(atab.user = ch.user, atab.status = ACCOUNT_PENDING,
+                    atab.createdAt = now));
+            }
+        }
 
         PasskeyRow p;
         get_passkey(db, cred_id, p);
         json ret = json::object();
         ret["status"] = "success";
         ret["user"] = ch.user;
+        ret["approved"] = is_approved(db, ch.user);
         ret["passkey"] = passkey_to_json(p);
         if (skey == "") {
-            // 新規アカウントはそのままログイン状態にする
+            // 新規アカウントはそのままログイン状態にする（承認待ちでもログインはできる）
             ret["access_token"] = create_session(db, ch.user);
         }
         return ret;
@@ -891,6 +985,7 @@ namespace passkey {
         json ret = json::object();
         ret["status"] = "success";
         ret["user"] = p.user;
+        ret["approved"] = is_approved(db, p.user);
         ret["access_token"] = create_session(db, p.user);
         return ret;
     }
@@ -903,6 +998,7 @@ namespace passkey {
         json ret = json::object();
         ret["status"] = "success";
         ret["user"] = s.user;
+        ret["approved"] = is_approved(db, s.user);
         ret["expire"] = format_time(s.expire);
         return ret;
     }
@@ -937,7 +1033,7 @@ namespace passkey {
         return ret;
     }
 
-    // 最後の 1 本を消すとそのアカウントには二度と入れなくなる（＝退会）
+    // 最後の 1 本を消すとそのアカウントには二度と入れないので、アカウントごと消す（＝退会）
     static inline json passkey_delete(sql::connection& db, const json& body,
                                       const std::string& skey, const Request& req)
     {
@@ -948,9 +1044,69 @@ namespace passkey {
         if (!get_passkey(db, cred_id, p) || p.user != user) throw PasskeyError("unknown credential");
         const auto tab = test::passkey::Passkey{};
         db(remove_from(tab).where(tab.id == p.id));
+        bool account_deleted = get_user_passkeys(db, user).empty();
+        if (account_deleted) delete_account(db, user);
         json ret = json::object();
         ret["status"] = "success";
         ret["credential_id"] = cred_id;
+        ret["account_deleted"] = account_deleted;
+        return ret;
+    }
+
+    static inline json account_list(sql::connection& db, const json& body,
+                                    const std::string& skey, const Request& req)
+    {
+        std::string user = approved_user(db, skey);
+        const auto tab = test::passkey::Account{};
+        std::vector<std::string> users;
+        for (const auto& a : db(select(tab.user).from(tab).unconditionally().order_by(tab.id.asc()))) {
+            users.push_back(a.user.value());
+        }
+        json list = json::array();
+        for (auto& u : users) {
+            AccountRow a;
+            if (get_account(db, u, a)) list.push_back(account_to_json(db, a));
+        }
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["user"] = user;
+        ret["account_list"] = list;
+        ret["total_count"] = list.size();
+        return ret;
+    }
+
+    static inline json account_approve(sql::connection& db, const json& body,
+                                       const std::string& skey, const Request& req)
+    {
+        std::string user = approved_user(db, skey);
+        std::string target = str_of(body, "user");
+        if (target == "") throw PasskeyError("invalid request");
+        AccountRow a;
+        if (!get_account(db, target, a)) throw PasskeyError("unknown account");
+        if (a.status == ACCOUNT_APPROVED) throw PasskeyError("already approved");
+        const auto tab = test::passkey::Account{};
+        db(update(tab).set(tab.status = ACCOUNT_APPROVED, tab.approvedBy = user,
+            tab.approvedAt = time_to_db(time(NULL))).where(tab.id == a.id));
+        get_account(db, target, a);
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["account"] = account_to_json(db, a);
+        return ret;
+    }
+
+    // 自分以外のアカウントを消す。自分のは passkey/delete で最後の 1 本を消す（退会）
+    static inline json account_delete(sql::connection& db, const json& body,
+                                      const std::string& skey, const Request& req)
+    {
+        std::string user = approved_user(db, skey);
+        std::string target = str_of(body, "user");
+        if (target == "") throw PasskeyError("invalid request");
+        if (target == user) throw PasskeyError("cannot delete yourself");
+        if (!account_exists(db, target)) throw PasskeyError("unknown account");
+        delete_account(db, target);
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["user"] = target;
         return ret;
     }
 
@@ -998,6 +1154,15 @@ namespace passkey {
         expire DateTime NOT NULL,
         created_at DateTime default current_timestamp)
         )");
+        db.execute(R"(
+        CREATE TABLE IF NOT EXISTS account (
+        id int PRIMARY KEY AUTO_INCREMENT,
+        user TEXT NOT NULL,
+        status TEXT NOT NULL,
+        approved_by TEXT,
+        approved_at DateTime,
+        created_at DateTime)
+        )");
 #else
         db.execute(R"(
         CREATE TABLE IF NOT EXISTS passkey (
@@ -1035,7 +1200,20 @@ namespace passkey {
         expire TEXT NOT NULL,
         created_at TEXT)
         )");
+        db.execute(R"(
+        CREATE TABLE IF NOT EXISTS account (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user TEXT NOT NULL,
+        status TEXT NOT NULL,
+        approved_by TEXT,
+        approved_at TEXT,
+        created_at TEXT)
+        )");
 #endif
+        // account テーブルが無かった頃に登録した人は、承認済みのアカウントとして引き継ぐ
+        db.execute("INSERT INTO account (user, status, created_at) "
+            "SELECT DISTINCT user, 'approved', '" + time_to_db(time(NULL)) + "' FROM passkey "
+            "WHERE user NOT IN (SELECT user FROM account)");
     }
 
     typedef json(*api_func)(sql::connection&, const json&, const std::string&, const Request&);
@@ -1087,6 +1265,9 @@ namespace passkey {
         add_route(svr, "/api/passkey/v0/logout", passkey_logout);
         add_route(svr, "/api/passkey/v0/list", passkey_list);
         add_route(svr, "/api/passkey/v0/delete", passkey_delete);
+        add_route(svr, "/api/account/v0/list", account_list);
+        add_route(svr, "/api/account/v0/approve", account_approve);
+        add_route(svr, "/api/account/v0/delete", account_delete);
         svr.Get("/", [](const Request& req, Response& res) {
             res.set_redirect("/html/index.html");
             });

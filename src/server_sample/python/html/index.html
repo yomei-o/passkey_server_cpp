@@ -78,6 +78,15 @@
     font-size: .8rem; max-height: 360px; margin: 8px 0 0;
   }
   details summary { cursor: pointer; color: var(--muted); }
+  .card.pending { border-color: var(--glow); }
+  .member { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+            flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--line); }
+  .member:first-child { border-top: none; }
+  .member .meta { font-size: .85rem; color: var(--muted); }
+  .badge { display: inline-block; font-size: .75rem; padding: 1px 8px; border-radius: 999px;
+           margin-left: 6px; border: 1px solid var(--line); color: var(--muted); }
+  .badge.pending { border-color: var(--glow); color: var(--fg); }
+  .badge.me { border-color: var(--accent); color: var(--accent); }
   .note { font-size: .9rem; color: var(--muted); }
   .hidden { display: none !important; }
 </style>
@@ -89,8 +98,9 @@
     <div class="who" id="who">ログインしていません</div>
   </header>
   <p class="lead">
-    パスキー（WebAuthn）でログインした人だけが、みんなで共有している電気のスイッチを切り替えられます。
+    パスキー（WebAuthn）でログインした、承認済みのメンバーだけが、みんなで共有している電気のスイッチを切り替えられます。
     スマホなら顔や指紋、PC なら Windows Hello などで本人確認します。
+    最初に登録した人は自動で承認され、2 人目からは承認済みのメンバーが許可します。
   </p>
 
   <section class="card">
@@ -119,6 +129,24 @@
     </div>
     <p class="note">ログインはユーザー名を空のままでもできます（端末に保存されたパスキーから選びます）。</p>
     <div class="msg" id="msgOut"></div>
+  </section>
+
+  <section class="card hidden pending" id="pendingCard">
+    <h2>承認待ちです</h2>
+    <p class="note">
+      登録とログインはできていますが、スイッチを使うには、すでに承認されているメンバーの誰かに
+      「許可」してもらう必要があります。許可されると、このページを開いたままで使えるようになります。
+    </p>
+  </section>
+
+  <section class="card hidden" id="membersCard">
+    <h2>メンバー</h2>
+    <p class="note">
+      最初に登録した人は自動で承認されます。2 人目からは、承認済みのメンバーが許可するまで承認待ちです。
+      承認済みのメンバーは、自分以外のアカウントを削除できます（承認待ちの人を消すと却下になります）。
+    </p>
+    <div id="members"></div>
+    <div class="msg" id="msgMembers"></div>
   </section>
 
   <section class="card hidden" id="loggedIn">
@@ -279,7 +307,9 @@ async function register(mode) {
   if (r.access_token) setToken(r.access_token);
   showMsg("msgOut", "");
   await refreshMe();
-  showMsg("msgIn", mode === "add" ? "パスキーを追加しました" : "登録してログインしました", "ok");
+  showMsg("msgIn", mode === "add" ? "パスキーを追加しました"
+    : r.approved ? "登録してログインしました（最初のメンバーなので承認済みです）"
+    : "登録してログインしました（承認待ちです）", "ok");
 }
 
 async function login() {
@@ -324,27 +354,121 @@ function utcToLocal(s) {
 }
 
 let me = "";
+let approved = false;
 
-async function refreshMe() {
+// quiet: 定期確認のときは通信ログに出さない
+async function refreshMe(quiet) {
+  const was = me + "/" + approved;
   me = "";
+  approved = false;
   if (token) {
-    const r = await api("/api/passkey/v0/me", {}, true);
-    if (r.status === "success") me = r.user;
-    else setToken("");
+    const r = quiet ? await apiQuiet("/api/passkey/v0/me", {}) : await api("/api/passkey/v0/me", {}, true);
+    if (r.status === "success") {
+      me = r.user;
+      approved = r.approved;
+    } else {
+      setToken("");
+    }
+  }
+  if (quiet && was === me + "/" + approved) {
+    if (approved) await refreshMembers(true);
+    return;
   }
   $("loggedOut").classList.toggle("hidden", !!me);
   $("loggedIn").classList.toggle("hidden", !me);
+  $("pendingCard").classList.toggle("hidden", !me || approved);
+  $("membersCard").classList.toggle("hidden", !approved);
   $("who").innerHTML = "";
   if (me) {
     const b = document.createElement("b");
     b.textContent = me;
-    $("who").append(b, " でログイン中");
+    $("who").append(b, approved ? " でログイン中" : " でログイン中（承認待ち）");
   } else {
     $("who").textContent = "ログインしていません";
   }
-  $("toggle").disabled = !me;
-  $("toggleHint").textContent = me ? "押すとみんなの電気が切り替わります" : "ログインすると切り替えられます";
+  $("toggle").disabled = !approved;
+  $("toggleHint").textContent = approved ? "押すとみんなの電気が切り替わります"
+    : me ? "承認されると切り替えられます" : "ログインすると切り替えられます";
   if (me) await refreshKeys();
+  if (approved) await refreshMembers(quiet);
+}
+
+async function apiQuiet(path, body) {
+  const h = { "Content-Type": "application/json" };
+  if (token) h.Authorization = "Bearer " + token;
+  const res = await fetch(path, { method: "POST", headers: h, body: JSON.stringify(body || {}) });
+  return res.json();
+}
+
+async function refreshMembers(quiet) {
+  const r = quiet ? await apiQuiet("/api/account/v0/list", {}) : await api("/api/account/v0/list", {}, true);
+  const box = $("members");
+  if (r.status !== "success") return;
+  const key = JSON.stringify(r.account_list);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = "";
+  // 承認待ちを上に
+  const list = r.account_list.slice().sort((a, b) =>
+    (a.status === "pending" ? 0 : 1) - (b.status === "pending" ? 0 : 1));
+  for (const a of list) {
+    const row = document.createElement("div");
+    row.className = "member";
+    const left = document.createElement("div");
+    const name = document.createElement("b");
+    name.textContent = a.user;
+    left.append(name);
+    if (a.user === me) {
+      const s = document.createElement("span");
+      s.className = "badge me";
+      s.textContent = "自分";
+      left.append(s);
+    }
+    const badge = document.createElement("span");
+    badge.className = "badge" + (a.status === "pending" ? " pending" : "");
+    badge.textContent = a.status === "pending" ? "承認待ち" : "承認済み";
+    left.append(badge);
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = "登録 " + utcToLocal(a.created_at) + " ・ パスキー " + a.passkey_count + " 個" +
+      (a.approved_by ? " ・ " + a.approved_by + " が承認" : "");
+    left.append(meta);
+    const btns = document.createElement("div");
+    btns.className = "row";
+    btns.style.marginTop = "0";
+    if (a.status === "pending") {
+      const ok = document.createElement("button");
+      ok.className = "primary";
+      ok.textContent = "許可";
+      ok.onclick = () => approveAccount(a.user);
+      btns.append(ok);
+    }
+    if (a.user !== me) {
+      const del = document.createElement("button");
+      del.className = "danger";
+      del.textContent = a.status === "pending" ? "却下" : "削除";
+      del.onclick = () => deleteAccount(a);
+      btns.append(del);
+    }
+    row.append(left, btns);
+    box.append(row);
+  }
+}
+
+async function approveAccount(user) {
+  const r = await api("/api/account/v0/approve", { user }, true);
+  if (r.status !== "success") return showMsg("msgMembers", "許可できません: " + r.message, "err");
+  showMsg("msgMembers", user + " を許可しました", "ok");
+  await refreshMembers();
+}
+
+async function deleteAccount(a) {
+  const what = a.status === "pending" ? "の登録を却下" : "のアカウントを削除";
+  if (!confirm("「" + a.user + "」" + what + "しますか？（パスキーとログイン中のセッションも消えます）")) return;
+  const r = await api("/api/account/v0/delete", { user: a.user }, true);
+  if (r.status !== "success") return showMsg("msgMembers", "削除できません: " + r.message, "err");
+  showMsg("msgMembers", a.user + " " + (a.status === "pending" ? "を却下しました" : "を削除しました"), "ok");
+  await refreshMembers();
 }
 
 const LABELS = {
@@ -413,12 +537,11 @@ async function deleteKey(p, count) {
       await PublicKeyCredential.signalUnknownCredential({ rpId: location.hostname, credentialId: p.credential_id });
     }
   } catch (e) {}
-  if (count <= 1) {
-    await api("/api/passkey/v0/logout", {}, true);
-    setToken("");
-  }
+  // 最後の 1 本ならサーバがアカウントごと消している（トークンも無効）
+  if (r.account_deleted) setToken("");
   await refreshMe();
-  showMsg(count <= 1 ? "msgOut" : "msgIn", "削除しました", "ok");
+  showMsg(r.account_deleted ? "msgOut" : "msgIn",
+    r.account_deleted ? "アカウントを削除しました" : "削除しました", "ok");
 }
 
 async function logout() {
@@ -450,7 +573,8 @@ async function toggleSwitch() {
   const r = await api("/api/switch/v0/set", { on: !switchOn }, true);
   if (r.status === "success") renderSwitch(r);
   else if (r.message === "not logged in") { setToken(""); await refreshMe(); }
-  $("toggle").disabled = !me;
+  else if (r.message === "not approved") await refreshMe();
+  $("toggle").disabled = !approved;
 }
 
 // ---------- 起動 ----------
@@ -470,6 +594,8 @@ if (!supported()) {
 refreshMe();
 pollSwitch();
 setInterval(pollSwitch, 2000);
+// 承認された・消された・メンバーが増えた、を拾う
+setInterval(() => { if (token) refreshMe(true).catch(() => {}); }, 4000);
 </script>
 </body>
 </html>

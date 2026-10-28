@@ -157,7 +157,7 @@ def make_get(key, options, origin, rp_id=None, typ="webauthn.get", flags=UP | UV
 
 def reset_db(db_path):
     c = sqlite3.connect(db_path)
-    for t in ("session", "passkey", "passkey_challenge", "switch_state"):
+    for t in ("session", "passkey", "passkey_challenge", "switch_state", "account"):
         c.execute("delete from " + t)
     c.commit()
     c.close()
@@ -219,6 +219,7 @@ def run(ck, post, db_path, origin):
     ck(len(A) == 32, "sign up returns an access_token")
     me = post("/api/passkey/v0/me", {}, A)
     ck(me.get("status") == "success" and me.get("user") == "alice", "me -> alice")
+    ck(r1.get("approved") is True and me.get("approved") is True, "the first user is approved at once")
     row = r1.get("passkey", {})
     ck(row.get("credential_id") == k1.id, "stored credential_id")
     ck(row.get("user") == "alice" and row.get("name") == "my phone", "stored user / name")
@@ -234,8 +235,11 @@ def run(ck, post, db_path, origin):
 
     # 同じ名前で options を 2 回取って、先に片方が登録したら後の方は弾く
     o1, o2 = reg_options("carol"), reg_options("carol")
-    ck(post("/api/passkey/v0/register_verify", make_create(SoftKey(-7), o1, origin)).get("status")
-       == "success", "carol signs up")
+    kc = SoftKey(-7)
+    rc = post("/api/passkey/v0/register_verify", make_create(kc, o1, origin))
+    C = rc.get("access_token", "")
+    ck(rc.get("status") == "success" and rc.get("approved") is False and len(C) == 32,
+       "carol signs up as the 2nd user -> pending, but logged in")
     check_fail(post("/api/passkey/v0/register_verify", make_create(SoftKey(-7), o2, origin)),
                "user already exists")
 
@@ -282,7 +286,7 @@ def run(ck, post, db_path, origin):
     kb = SoftKey(-7)
     rb = signup("bob", kb)
     B = rb.get("access_token", "")
-    ck(rb.get("status") == "success", "bob signs up")
+    ck(rb.get("status") == "success" and rb.get("approved") is False, "bob signs up -> pending")
     reg_fail("challenge user mismatch", opts=reg_options(token=A), token=B)
     reg_fail("challenge user mismatch", opts=reg_options("dave"), token=A)
 
@@ -378,21 +382,81 @@ def run(ck, post, db_path, origin):
     check_fail(post("/api/passkey/v0/register_verify", make_create(k, reg_options("newuser"), origin)),
                "invalid public key")
 
+    print("\n--- accounts (approve / delete) ---")
+    ck(post("/api/passkey/v0/me", {}, C).get("approved") is False, "me says carol is pending")
+    check_fail(post("/api/account/v0/list", {}, C), "not approved")
+    check_fail(post("/api/account/v0/approve", {"user": "carol"}, C), "not approved")
+    check_fail(post("/api/account/v0/delete", {"user": "alice"}, C), "not approved")
+    check_fail(post("/api/account/v0/list", {}), "not logged in")
+    r = post("/api/account/v0/list", {}, A)
+    accts = {a["user"]: a for a in r.get("account_list", [])}
+    ck(r.get("status") == "success" and sorted(accts) == ["alice", "bob", "carol"],
+       "alice lists alice / bob / carol")
+    ck(accts.get("alice", {}).get("status") == "approved" and accts["alice"].get("approved_by") == "alice",
+       "alice: approved (by herself, as the first user)")
+    ck(accts.get("carol", {}).get("status") == "pending" and accts["carol"].get("approved_by") is None,
+       "carol: pending")
+    ck(accts.get("alice", {}).get("passkey_count") == 1 and accts.get("bob", {}).get("passkey_count") == 1,
+       "passkey_count")
+    check_fail(post("/api/account/v0/approve", {}, A), "invalid request")
+    check_fail(post("/api/account/v0/approve", {"user": "nosuch"}, A), "unknown account")
+    check_fail(post("/api/account/v0/approve", {"user": "alice"}, A), "already approved")
+    r = post("/api/account/v0/approve", {"user": "carol"}, A)
+    ck(r.get("status") == "success" and r.get("account", {}).get("status") == "approved"
+       and r["account"].get("approved_by") == "alice" and len(r["account"].get("approved_at") or "") == 19,
+       "alice approves carol")
+    ck(post("/api/passkey/v0/me", {}, C).get("approved") is True, "carol is approved now")
+    ck(post("/api/account/v0/list", {}, C).get("status") == "success", "carol can list accounts now")
+
+    check_fail(post("/api/account/v0/delete", {"user": "carol"}, C), "cannot delete yourself")
+    check_fail(post("/api/account/v0/delete", {"user": "nosuch"}, C), "unknown account")
+    check_fail(post("/api/account/v0/delete", {}, C), "invalid request")
+    kd = SoftKey(-7)
+    rd = signup("dave", kd)
+    D = rd.get("access_token", "")
+    ck(rd.get("approved") is False, "dave signs up -> pending")
+    r = post("/api/account/v0/delete", {"user": "dave"}, C)
+    ck(r.get("status") == "success", "carol deletes (rejects) pending dave")
+    check_fail(post("/api/passkey/v0/me", {}, D), "not logged in")
+    login_fail("unknown credential", key=kd)
+    ck(not sql(db_path, "select 1 from passkey where user='dave'"), "dave's passkeys are gone")
+    ck(not sql(db_path, "select 1 from session where user='dave'"), "dave's sessions are gone")
+    ck(reg_options("dave").get("status") == "success", "the name dave is free again")
+
+    print("\n--- leaving: deleting your last passkey ---")
+    ke = SoftKey(-7)
+    re_ = signup("erin", ke)
+    E = re_.get("access_token", "")
+    r = post("/api/passkey/v0/delete", {"credential_id": ke.id}, E)
+    ck(r.get("status") == "success" and r.get("account_deleted") is True, "erin deletes her only key")
+    check_fail(post("/api/passkey/v0/me", {}, E), "not logged in")
+    ck(not sql(db_path, "select 1 from account where user='erin'"), "erin's account is gone")
+    r = post("/api/passkey/v0/delete", {"credential_id": k1.id}, A)
+    r2 = post("/api/passkey/v0/list", {}, A)
+    ck(r.get("account_deleted") is True and r2.get("message") == "not logged in",
+       "alice deletes her last key -> her account is gone too")
+    A = signup("alice", SoftKey(-7)).get("access_token", "")
+    ck(post("/api/passkey/v0/me", {}, A).get("approved") is False,
+       "alice signs up again but is pending (approved users still exist)")
+
     print("\n--- shared switch ---")
     r = post("/api/switch/v0/get", {})
     ck(r == {"status": "success", "on": False, "updated_by": None, "updated_at": None},
        "switch starts off, nobody touched it")
     check_fail(post("/api/switch/v0/set", {"on": True}), "not logged in")
     check_fail(post("/api/switch/v0/set", {"on": True}, "nosuchtoken"), "not logged in")
-    check_fail(post("/api/switch/v0/set", {"on": 1}, A), "invalid request")
-    check_fail(post("/api/switch/v0/set", {}, A), "invalid request")
-    r = post("/api/switch/v0/set", {"on": True}, A)
-    ck(r.get("status") == "success" and r.get("on") is True and r.get("updated_by") == "alice",
-       "alice turns it on")
+    check_fail(post("/api/switch/v0/set", {"on": True}, A), "not approved")
+    check_fail(post("/api/switch/v0/set", {"on": 1}, C), "invalid request")
+    check_fail(post("/api/switch/v0/set", {}, C), "invalid request")
+    r = post("/api/switch/v0/set", {"on": True}, C)
+    ck(r.get("status") == "success" and r.get("on") is True and r.get("updated_by") == "carol",
+       "carol turns it on")
     ck(len(r.get("updated_at") or "") == 19, "updated_at is YYYY-MM-DD HH:MM:SS")
     r = post("/api/switch/v0/get", {})
-    ck(r.get("on") is True and r.get("updated_by") == "alice", "everyone sees it on (by alice)")
+    ck(r.get("on") is True and r.get("updated_by") == "carol", "everyone sees it on (by carol)")
     B = post("/api/passkey/v0/login_verify", make_get(kb, lopt(), origin)).get("access_token", "")
+    check_fail(post("/api/switch/v0/set", {"on": False}, B), "not approved")
+    ck(post("/api/account/v0/approve", {"user": "bob"}, C).get("status") == "success", "carol approves bob")
     r = post("/api/switch/v0/set", {"on": False}, B)
     ck(r.get("on") is False and r.get("updated_by") == "bob", "bob turns it off")
     ck(sql(db_path, "select count(*) from switch_state") == [(1,)], "one row for the switch")

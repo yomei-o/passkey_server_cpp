@@ -526,5 +526,126 @@ namespace passkey
       };
     };
   };
+  namespace Account_
+  {
+    struct Id
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "id";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T id;
+            T& operator()() { return id; }
+            const T& operator()() const { return id; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::integer, sqlpp::tag::must_not_insert, sqlpp::tag::must_not_update, sqlpp::tag::can_be_null>;
+    };
+    struct User
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "user";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T user;
+            T& operator()() { return user; }
+            const T& operator()() const { return user; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::require_insert>;
+    };
+    struct Status
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "status";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T status;
+            T& operator()() { return status; }
+            const T& operator()() const { return status; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::require_insert>;
+    };
+    struct ApprovedBy
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "approved_by";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T approvedBy;
+            T& operator()() { return approvedBy; }
+            const T& operator()() const { return approvedBy; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::can_be_null>;
+    };
+    struct ApprovedAt
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "approved_at";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T approvedAt;
+            T& operator()() { return approvedAt; }
+            const T& operator()() const { return approvedAt; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::can_be_null>;
+    };
+    struct CreatedAt
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "created_at";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T createdAt;
+            T& operator()() { return createdAt; }
+            const T& operator()() const { return createdAt; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::can_be_null>;
+    };
+  } // namespace Account_
+
+  struct Account: sqlpp::table_t<Account,
+               Account_::Id,
+               Account_::User,
+               Account_::Status,
+               Account_::ApprovedBy,
+               Account_::ApprovedAt,
+               Account_::CreatedAt>
+  {
+    struct _alias_t
+    {
+      static constexpr const char _literal[] =  "account";
+      using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+      template<typename T>
+      struct _member_t
+      {
+        T account;
+        T& operator()() { return account; }
+        const T& operator()() const { return account; }
+      };
+    };
+  };
 } // namespace passkey
 } // namespace test

@@ -33,3 +33,12 @@ CREATE TABLE session (
     expire TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (DATETIME('now', 'localtime')))
 ;
+
+CREATE TABLE account (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user TEXT NOT NULL,
+    status TEXT NOT NULL,
+    approved_by TEXT,
+    approved_at TEXT,
+    created_at TEXT)
+;
