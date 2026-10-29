@@ -9,6 +9,7 @@
 - **誰でも登録できます。** 最初に登録した人は「**全体の管理者**」になり、テナントの追加・削除とアカウントの削除ができます。
 - 2 人目からの全体の管理者は、**本人が申請して、いまの全体の管理者が承認**します。全体の管理者の画面には申請してきた人だけが並ぶので、アカウントが何百あっても一覧から探す必要はありません。
 - テナントは推測できない **GUID の URL**（`/html/index.html?tenant=<GUID>`）で開きます。全体の管理者がテナントを追加し、その URL をテナントの人に渡します。
+- テナントの URL は **QR コード**でも表示できます（全体の管理者のテナント一覧と、テナントの管理者の「メンバーを招待」）。QR コードはサーバではなく**ブラウザ側で、C の QR ライブラリを WebAssembly にしたもの（`qr.wasm`）**で作ります。
 - URL を開いた人は「参加申請」します。**そのテナントに管理者がまだいなければ、申請した人がそのままテナントの管理者**になります。それ以降の申請は、テナントの管理者が「管理者」か「一般」として承認します（却下・外すのもテナントの管理者だけ）。
 
 ```
@@ -184,7 +185,7 @@ src/server_sample/
 │   │   ├── lambda_server.h         Bearer の取り出し、CORS
 │   │   └── database.h              SQLite / MySQL の切替（#define USE_MYSQL）
 │   ├── models/                     sqlpp11 のテーブル定義（*.ddl → ddl2cpp で model_*.h）
-│   ├── html/index.html             画面（python/html/ と同じファイル）
+│   ├── html/                       画面（index.html / qr.js / qr.wasm。python/html/ と同じファイル）
 │   ├── include/ sqlpp11/ sqlite/ mysql_8_4/ date/ openssl/ gen/   同梱ライブラリ
 │   └── build_lambda_image.sh       AWS Lambda 用 zip（MySQL 版）
 └── python/
@@ -193,7 +194,12 @@ src/server_sample/
     ├── testsv_api_tenant.py        テナントとテナントごとの電気の API
     ├── model_passkey.py model_tenant.py model_switch.py   SQLAlchemy のモデル
     ├── database.py                 接続先（既定 SQLite、RDS_PROXY_HOST / DATABASE_URL で切替）
-    └── html/index.html
+    └── html/                       cpp/html と同じ
+
+src/web/qr/                         QR コード生成の WebAssembly
+├── qrcodegen.c qrcodegen.h         Nayuki の QR Code generator（C 版 v1.8.0、無改変）
+├── qr_wasm.c                       JavaScript から呼ぶ窓口と、必要な数個の libc 関数
+└── build.sh                        qr.wasm を作って cpp/html と python/html に置く
 
 tests/
 ├── passkey_common.py      C++ / Python 共通のテスト本体（ソフトウェア認証器でブラウザの代わりをする）
@@ -203,7 +209,8 @@ tests/
 ```
 
 - **C++ と Python の両方に同じ API を実装すること。** 片方だけ直すのは避けてください。
-- `html/index.html` は `cpp/html` と `python/html` に**同じファイル**を置いています。
+- `html/` の中身（`index.html` / `qr.js` / `qr.wasm`）は `cpp/html` と `python/html` に**同じファイル**を置いています。
+- `qr.wasm` は `bash src/web/qr/build.sh` で作り直せます。WebAssembly を出せる clang が要ります（Emscripten SDK の clang で可）。Emscripten の補助 JS は使わない素の WebAssembly で、約 15 KB です。
 - C++ のモデルは `models/*.ddl` から生成します（`python ddl2cpp passkey.ddl model_passkey test::passkey`、`make_header.bat` に全部載っています）。`model_*.h` は直接編集しないでください。DDL を変えたら、`testsv_api_*.h` の中の `CREATE TABLE`（MySQL と SQLite の両方）にも同じ変更を入れてください。
 
 ### MySQL を使う
@@ -259,3 +266,4 @@ python tests/browser_e2e.py http://localhost:8099
 | `cpp/sqlite/` | SQLite | Public Domain |
 | `cpp/mysql_8_4/`, `cpp/postgre_17/` | MySQL / PostgreSQL のクライアントヘッダ | 各ライセンス |
 | `cpp/lambda-adapter` | AWS Lambda Web Adapter | Apache-2.0 |
+| `src/web/qr/qrcodegen.*`（`html/qr.wasm` に入っている） | Nayuki QR Code generator | MIT |

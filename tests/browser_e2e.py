@@ -42,6 +42,27 @@ def new_page(browser):
     return page
 
 
+def read_qr(locator):
+    """画面の QR コードを撮って OpenCV で読む。OpenCV が無ければ None"""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+    png = locator.screenshot()
+    img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
+    text, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+    return text
+
+
+def check_qr(locator, url, what):
+    text = read_qr(locator)
+    if text is None:
+        print("  SKIP  " + what + " (no OpenCV)")
+    else:
+        ck(text == url, what + " -> " + text)
+
+
 def wait_text(page, sel, text, timeout=8000):
     page.wait_for_function("([s, t]) => (document.querySelector(s) || {}).textContent.includes(t)",
                            arg=[sel, text], timeout=timeout)
@@ -70,6 +91,11 @@ with sync_playwright() as p:
     url = re.search(r"https?://\S+\?tenant=[0-9a-f]{32}", admin.inner_text("#msgTenants")).group(0)
     ck(True, "the tenant URL is shown: " + url)
     wait_text(admin, "#tenants", TENANT)
+    admin.wait_for_selector("#tenants .qr-box svg", timeout=8000)
+    check_qr(admin.locator("#tenants .qr-box svg"), url, "the new tenant's QR code (qr.wasm) reads back as its URL")
+    admin.click("#tenants .qr-toggle")
+    admin.wait_for_selector("#tenants .qr-box", state="detached", timeout=8000)
+    ck(True, "the QR code can be closed")
 
     print("\n--- the first one to join becomes the tenant admin ---")
     owner = new_page(browser)
@@ -83,6 +109,8 @@ with sync_playwright() as p:
     wait_text(owner, "#msgTenant", "管理者です")
     owner.wait_for_selector("#toggle", timeout=8000)
     ck(owner.locator("#tenantMembersCard").is_visible(), "the tenant admin sees the member list")
+    owner.wait_for_selector("#tenantInvite svg", timeout=8000)
+    check_qr(owner.locator("#tenantInvite svg"), url, "the tenant admin's invite QR code reads back as the URL")
     before = "ついています" in owner.inner_text("#state")
     owner.click("#toggle")
     wait_text(owner, "#state", "消えて" if before else "ついて")
@@ -107,6 +135,7 @@ with sync_playwright() as p:
     staff.wait_for_selector("#toggle", timeout=8000)
     ck(True, "after approval the staff page shows the light (no reload)")
     ck(staff.locator("#tenantMembers button").count() == 0, "a plain member has no approve / remove buttons")
+    ck(staff.locator("#tenantInviteBox").is_hidden(), "a plain member does not see the invite QR")
     now = "ついています" in staff.inner_text("#state")
     staff.click("#toggle")
     wait_text(staff, "#lastBy", STAFF)

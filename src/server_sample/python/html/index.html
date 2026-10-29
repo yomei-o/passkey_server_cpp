@@ -99,6 +99,10 @@
   details summary { cursor: pointer; color: var(--muted); }
   .note { font-size: .9rem; color: var(--muted); }
   .hidden { display: none !important; }
+  .qr-box { display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+            padding: 8px 0 12px; }
+  .qr-box svg { flex: none; border-radius: 8px; }
+  .qr-box .meta { font-size: .85rem; color: var(--muted); word-break: break-all; max-width: 420px; }
 </style>
 </head>
 <body>
@@ -126,6 +130,11 @@
     </p>
     <div id="tenantMembers"></div>
     <div class="msg" id="msgMembers"></div>
+    <div class="hidden" id="tenantInviteBox">
+      <h3 class="note">メンバーを招待</h3>
+      <p class="note">この QR コードか URL を渡してください。開いた人がログインして参加申請すると、ここに出てきます。</p>
+      <div id="tenantInvite"></div>
+    </div>
   </section>
 
   <section class="card" id="loggedOut">
@@ -201,6 +210,7 @@
   </section>
 </main>
 
+<script src="qr.js"></script>
 <script>
 "use strict";
 
@@ -533,6 +543,12 @@ async function refreshTenantMembers(quiet) {
   const box = $("tenantMembers");
   if (r.status !== "success") return;
   const isAdmin = r.me.role === "admin";
+  // 招待用の QR（テナントの管理者だけ）
+  $("tenantInviteBox").classList.toggle("hidden", !isAdmin);
+  const inv = $("tenantInvite");
+  render(inv, isAdmin ? TENANT : "", () => {
+    if (isAdmin) inv.append(qrPanel(tenantUrl(TENANT), () => copyUrl({ tenant: TENANT, name: current ? current.name : "" })));
+  });
   render(box, JSON.stringify([isAdmin, r.member_list]), () => {
     // 承認待ちを上に
     const list = r.member_list.slice().sort((a, b) =>
@@ -603,11 +619,25 @@ async function removeMember(m) {
 }
 
 // ---------- テナントの一覧（全体の管理者は追加・削除も） ----------
+// テナントの URL の QR コードと URL を並べた部品。QR は qr.wasm で作る（qr.js）
+function qrPanel(url, onCopy) {
+  const box = el("div", { class: "qr-box" });
+  const info = el("div", { class: "meta" }, el("div", { text: url }));
+  if (onCopy) info.append(el("div", { class: "row" }, el("button", { text: "URL をコピー", onclick: onCopy })));
+  box.append(info);
+  QR.svg(url, { size: 180 }).then((svg) => box.prepend(svg))
+    .catch((e) => info.prepend(el("div", { class: "msg err", text: "QR コードを作れません: " + e.message })));
+  return box;
+}
+
+// QR を開いているテナント（一覧を描き直しても開いたままにする）
+const openQr = new Set();
+
 async function refreshTenants(quiet) {
   const r = await api("/api/tenant/v0/list", {}, quiet);
   const box = $("tenants");
   if (r.status !== "success") return;
-  render(box, JSON.stringify([myRole, r.tenant_list]), () => {
+  render(box, JSON.stringify([myRole, r.tenant_list, [...openQr]]), () => {
     if (r.tenant_list.length === 0) {
       box.append(el("p", { class: "note", text: myRole === "admin" ? "テナントはまだありません。"
         : "まだどのテナントにも参加していません。テナントの管理者から URL をもらって開いてください。" }));
@@ -622,13 +652,22 @@ async function refreshTenants(quiet) {
           (myRole === "admin" ? " ・ " + tenantUrl(t.tenant) : "") }));
       const btns = el("div", { class: "row" });
       if (myRole === "admin") {
+        const open = openQr.has(t.tenant);
         btns.append(
+          el("button", { class: "qr-toggle", text: open ? "QR を閉じる" : "QR コード", onclick: () => toggleQr(t) }),
           el("button", { text: "URL をコピー", onclick: () => copyUrl(t) }),
           el("button", { class: "danger", text: "削除", onclick: () => deleteTenant(t) }));
       }
       box.append(el("div", { class: "item" }, left, btns));
+      if (myRole === "admin" && openQr.has(t.tenant)) box.append(qrPanel(tenantUrl(t.tenant)));
     }
   });
+}
+
+function toggleQr(t) {
+  if (openQr.has(t.tenant)) openQr.delete(t.tenant);
+  else openQr.add(t.tenant);
+  refreshTenants(true);
 }
 
 async function copyUrl(t) {
@@ -645,6 +684,7 @@ async function addTenant() {
   const r = await api("/api/tenant/v0/add", { name });
   if (r.status !== "success") return showMsg("msgTenants", "追加できません: " + r.message, "err");
   $("tenantNew").value = "";
+  openQr.add(r.tenant.tenant);        // 追加したテナントは QR を開いておく
   showMsg("msgTenants", r.tenant.name + " を追加しました。URL: " + tenantUrl(r.tenant.tenant), "ok");
   await refreshAll();
 }

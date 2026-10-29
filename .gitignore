@@ -23,3 +23,6 @@ src/server_sample/cpp/x64/
 # Python
 __pycache__/
 *.pyc
+
+# QR の WebAssembly はビルドすると cpp/html と python/html にコピーされる（そちらを管理する）
+src/web/qr/qr.wasm
