@@ -6,7 +6,8 @@
 - Python 版は FastAPI + SQLAlchemy で書いています。署名検証には cryptography を使います。
 - DB は SQLite（既定）と MySQL を切り替えられます。
 - デモとして「**テナントごとの電気のスイッチ**」が付いています。テナントのメンバーだけが、そのテナントの電気をオン・オフできます。
-- **誰でも登録できます。** 最初に登録した人は「**全体の管理者**」になり、テナントの追加・削除、アカウントの削除、ほかの人を全体の管理者にすることができます。
+- **誰でも登録できます。** 最初に登録した人は「**全体の管理者**」になり、テナントの追加・削除とアカウントの削除ができます。
+- 2 人目からの全体の管理者は、**本人が申請して、いまの全体の管理者が承認**します。全体の管理者の画面には申請してきた人だけが並ぶので、アカウントが何百あっても一覧から探す必要はありません。
 - テナントは推測できない **GUID の URL**（`/html/index.html?tenant=<GUID>`）で開きます。全体の管理者がテナントを追加し、その URL をテナントの人に渡します。
 - URL を開いた人は「参加申請」します。**そのテナントに管理者がまだいなければ、申請した人がそのままテナントの管理者**になります。それ以降の申請は、テナントの管理者が「管理者」か「一般」として承認します（却下・外すのもテナントの管理者だけ）。
 
@@ -84,6 +85,7 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | `passkey` | パスキー 1 つにつき 1 行。`user` / `credential_id` / `user_handle` / `public_key`（COSE_Key を base64url） / `alg` / `sign_count` / `transports` / `backup_eligible` / `backed_up` / `aaguid` / `name` / `last_used_at` |
 | `passkey_challenge` | 発行したチャレンジ。検証に来たら成否にかかわらず消す（使い回し防止）。5 分で失効 |
 | `account` | アカウント 1 つにつき 1 行。`role` は `admin`（全体の管理者）/ `member`。`status` は常に `approved`（昔の承認制の名残） |
+| `admin_request` | 全体の管理者への申請（`user` / `created_at`）。承認・却下・取り下げで消える |
 | `session` | ログイン中のトークン（`skey`）。24 時間で失効。アカウントが消えると無効 |
 | `tenant` | テナント。`guid`（URL に使うランダムな 32 桁の 16 進数）/ `name` / `created_by` |
 | `tenant_member` | テナントのメンバー。`tenant_id` / `user` / `status`（`approved` / `pending`）/ `role`（`admin` / `member`、承認待ちの間は NULL）/ `approved_by` / `approved_at` |
@@ -107,12 +109,17 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | `/api/passkey/v0/register_verify` | 任意 | `credential.toJSON()` の形 + `name` → `{user, passkey}`。新規アカウントなら `access_token` も返す |
 | `/api/passkey/v0/login_options` | 不要 | `{user?}` → `{publicKey}`（`user` を省くと `allowCredentials` が空になり、端末のパスキーから選ぶ） |
 | `/api/passkey/v0/login_verify` | 不要 | `credential.toJSON()` の形 → `{user, access_token}` |
-| `/api/passkey/v0/me` | 要 | → `{user, role, expire}`（`register_verify` / `login_verify` も `role` を返す） |
+| `/api/passkey/v0/me` | 要 | → `{user, role, admin_requested, expire}`（`register_verify` / `login_verify` も `role` を返す） |
 | `/api/passkey/v0/logout` | 要 | このトークンのセッションを消す |
 | `/api/passkey/v0/list` | 要 | 自分のパスキー一覧 → `{user, passkey_list, columns, total_count}` |
 | `/api/passkey/v0/delete` | 要 | `{credential_id}` → `{account_deleted}`。最後の 1 本ならアカウントごと消える（最後の全体の管理者は不可） |
 | `/api/account/v0/list` | 全体の管理者 | 全アカウント → `{account_list: [{user, status, role, approved_by, approved_at, created_at, passkey_count}]}` |
-| `/api/account/v0/set_role` | 全体の管理者 | `{user, role: "admin" / "member"}`。全体の管理者が 0 人になる変更は不可 |
+| `/api/account/v0/demote` | 全体の管理者 | `{user}` の全体の管理者を一般に戻す（自分も可）。0 人になる変更は不可 |
+| `/api/account/v0/admin_request` | 要 | 全体の管理者に申請する → `{request: {user, created_at, passkey_count}}` |
+| `/api/account/v0/admin_request_cancel` | 要 | 自分の申請を取り下げる |
+| `/api/account/v0/admin_requests` | 全体の管理者 | 申請の一覧 → `{request_list, total_count}` |
+| `/api/account/v0/admin_approve` | 全体の管理者 | `{user}` の申請を承認して全体の管理者にする → `{account}` |
+| `/api/account/v0/admin_reject` | 全体の管理者 | `{user}` の申請を却下する |
 | `/api/account/v0/delete` | 全体の管理者 | `{user}` で自分以外のアカウントを消す（パスキー・セッション・テナントの所属も消える） |
 | `/api/tenant/v0/get` | 任意 | `{tenant}` → `{tenant: {tenant, name, created_by, created_at, member_count, my_status, my_role, on, updated_by, updated_at}}`。名前は誰でも見えるが、`on` などの電気の状態は承認済みメンバーにだけ返す（他は `null`） |
 | `/api/tenant/v0/list` | 要 | 全体の管理者は全テナント、それ以外は自分が参加（申請）しているテナント → `{tenant_list}` |
@@ -147,8 +154,8 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | | ユーザ名が 1〜64 バイトで制御文字を含まないか | `invalid user name` |
 | | トークンが無効・期限切れ・アカウントが消えた | `not logged in` |
 | アカウント | 全体の管理者だけの API を一般が呼んだ | `admin only` |
-| | `role` が `admin` / `member` でない | `invalid role` |
-| | 存在しない / 自分自身 | `unknown account` / `cannot delete yourself` |
+| | 存在しない / 自分自身 / 一般を一般に戻そうとした | `unknown account` / `cannot delete yourself` / `not an admin` |
+| | もう全体の管理者 / 申請済み / 申請が無い | `already admin` / `already requested` / `unknown request` |
 | | 全体の管理者が 0 人になる | `last admin cannot be demoted` / `last admin cannot leave` |
 | テナント | GUID が無い / 存在しない | `invalid request` / `unknown tenant` |
 | | テナント名が 1〜64 バイトでない、同じ名前がある | `invalid tenant name` / `tenant already exists` |
@@ -222,7 +229,7 @@ python ../../tests/cpp/test_passkey.py
 python tests/browser_e2e.py http://localhost:8099
 ```
 
-`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系、全体の役割、テナントの追加・参加・承認・電気・外す・抜ける・削除も確認します（C++ / Python とも 188 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、全体の管理者がテナントを追加 → URL を開いた人が参加して自動でテナントの管理者 → 別の人が参加申請 → テナントの管理者が一般として承認 → 電気を切り替えて相手の画面に反映 → 全体の管理者にはテナントの電気が見えない → メンバーを外す → 全体の管理者を増やす → テナント削除 → ログアウト・ログイン → 退会までを、3 人分のブラウザで画面から通します。**DB が空のサーバ**に対して実行してください。
+`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系、全体の管理者への申請・承認・却下・取り下げ・一般に戻す、テナントの追加・参加・承認・電気・外す・抜ける・削除も確認します（C++ / Python とも 209 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、全体の管理者がテナントを追加 → URL を開いた人が参加して自動でテナントの管理者 → 別の人が参加申請 → テナントの管理者が一般として承認 → 電気を切り替えて相手の画面に反映 → 全体の管理者にはテナントの電気が見えない → メンバーを外す → 2 人が全体の管理者に申請して 1 人を承認・1 人を却下 → 名前でアカウントを検索 → テナント削除 → ログアウト・ログイン → 退会までを、3 人分のブラウザで画面から通します。**DB が空のサーバ**に対して実行してください。
 
 ---
 

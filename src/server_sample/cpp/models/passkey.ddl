@@ -43,3 +43,9 @@ CREATE TABLE account (
     approved_at TEXT,
     created_at TEXT)
 ;
+
+CREATE TABLE admin_request (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user TEXT NOT NULL,
+    created_at TEXT)
+;

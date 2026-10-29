@@ -14,10 +14,17 @@
 //   /api/passkey/v0/delete             自分のパスキーを削除（最後の 1 本ならアカウントごと消える）
 //
 //   /api/account/v0/list               全アカウントの一覧（全体の管理者だけ）
-//   /api/account/v0/set_role           アカウントを全体の管理者 / 一般にする（全体の管理者だけ）
 //   /api/account/v0/delete             自分以外のアカウントを消す（全体の管理者だけ）
+//   /api/account/v0/demote             全体の管理者を一般に戻す（全体の管理者だけ。自分も可）
+//
+//   /api/account/v0/admin_request          全体の管理者に申請する（ログインしていれば誰でも）
+//   /api/account/v0/admin_request_cancel   自分の申請を取り下げる
+//   /api/account/v0/admin_requests         申請の一覧（全体の管理者だけ）
+//   /api/account/v0/admin_approve          申請を承認して全体の管理者にする（全体の管理者だけ）
+//   /api/account/v0/admin_reject           申請を却下する（全体の管理者だけ）
 //
 // 誰でも登録できる。最初の 1 人は全体の管理者（テナントの追加・削除ができる）、2 人目からは一般。
+// 2 人目からの全体の管理者は、本人が申請して、全体の管理者が承認する（一覧から選んで上げることはしない）。
 // 電気を操作できるかどうかはテナントのメンバーかどうかで決まる（testsv_api_tenant.h）。
 //
 // Python 版は python/testsv_api_passkey.py。検査の順番と失敗時の message を揃えてある。
@@ -618,6 +625,12 @@ namespace passkey {
         return get_account(db, user, a) && a.status == ACCOUNT_APPROVED;
     }
 
+    static inline bool has_admin_request(sql::connection& db, const std::string& user)
+    {
+        const auto tab = test::passkey::AdminRequest{};
+        return !db(select(tab.id).from(tab).where(tab.user == user)).empty();
+    }
+
     // 承認済みなら role、承認待ちや存在しなければ null
     static inline json role_of(sql::connection& db, const std::string& user)
     {
@@ -800,6 +813,8 @@ namespace passkey {
         db(remove_from(ptab).where(ptab.user == user));
         db(remove_from(stab).where(stab.user == user));
         db(remove_from(atab).where(atab.user == user));
+        const auto rtab = test::passkey::AdminRequest{};
+        db(remove_from(rtab).where(rtab.user == user));
         // テナントのメンバーからも外す（テナント機能を外してビルドしたときは表が無いので無視）
         try {
             const auto mtab = test::tenant::TenantMember{};
@@ -1035,6 +1050,7 @@ namespace passkey {
         ret["status"] = "success";
         ret["user"] = s.user;
         ret["role"] = role_of(db, s.user);
+        ret["admin_requested"] = has_admin_request(db, s.user);
         ret["expire"] = format_time(s.expire);
         return ret;
     }
@@ -1115,27 +1131,117 @@ namespace passkey {
         return ret;
     }
 
-    // {user, role}。role は "admin"（全体の管理者）か "member"（一般）。
-    // 全体の管理者が 1 人もいなくなる変更はできない
-    static inline json account_set_role(sql::connection& db, const json& body,
-                                        const std::string& skey, const Request& req)
+    // {user}。全体の管理者を一般に戻す（自分でもよい）。全体の管理者が 1 人もいなくなる変更はできない
+    static inline json account_demote(sql::connection& db, const json& body,
+                                      const std::string& skey, const Request& req)
     {
         admin_user(db, skey);
         std::string target = str_of(body, "user");
         if (target == "") throw PasskeyError("invalid request");
-        std::string role = str_of(body, "role");
-        if (role != ROLE_ADMIN && role != ROLE_MEMBER) throw PasskeyError("invalid role");
         AccountRow a;
         if (!get_account(db, target, a)) throw PasskeyError("unknown account");
-        if (a.role == ROLE_ADMIN && role == ROLE_MEMBER && admin_count(db) == 1) {
-            throw PasskeyError("last admin cannot be demoted");
-        }
+        if (a.role != ROLE_ADMIN) throw PasskeyError("not an admin");
+        if (admin_count(db) == 1) throw PasskeyError("last admin cannot be demoted");
         const auto tab = test::passkey::Account{};
-        db(update(tab).set(tab.role = role).where(tab.id == a.id));
+        db(update(tab).set(tab.role = ROLE_MEMBER).where(tab.id == a.id));
         get_account(db, target, a);
         json ret = json::object();
         ret["status"] = "success";
         ret["account"] = account_to_json(db, a);
+        return ret;
+    }
+
+    //
+    // 全体の管理者への申請
+    //
+
+    static inline json admin_request_to_json(sql::connection& db, const std::string& user, const std::string& created_at)
+    {
+        json o = json::object();
+        o["user"] = user;
+        o["created_at"] = format_time(created_at);
+        o["passkey_count"] = get_user_passkeys(db, user).size();
+        return o;
+    }
+
+    static inline json account_admin_request(sql::connection& db, const json& body,
+                                             const std::string& skey, const Request& req)
+    {
+        std::string user = session_user(db, skey);
+        if (role_of(db, user) == ROLE_ADMIN) throw PasskeyError("already admin");
+        if (has_admin_request(db, user)) throw PasskeyError("already requested");
+        std::string now = time_to_db(time(NULL));
+        const auto tab = test::passkey::AdminRequest{};
+        db(insert_into(tab).set(tab.user = user, tab.createdAt = now));
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["request"] = admin_request_to_json(db, user, now);
+        return ret;
+    }
+
+    static inline json account_admin_request_cancel(sql::connection& db, const json& body,
+                                                    const std::string& skey, const Request& req)
+    {
+        std::string user = session_user(db, skey);
+        if (!has_admin_request(db, user)) throw PasskeyError("unknown request");
+        const auto tab = test::passkey::AdminRequest{};
+        db(remove_from(tab).where(tab.user == user));
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["user"] = user;
+        return ret;
+    }
+
+    static inline json account_admin_requests(sql::connection& db, const json& body,
+                                              const std::string& skey, const Request& req)
+    {
+        admin_user(db, skey);
+        const auto tab = test::passkey::AdminRequest{};
+        std::vector<std::pair<std::string, std::string>> rows;
+        for (const auto& a : db(select(all_of(tab)).from(tab).unconditionally().order_by(tab.id.asc()))) {
+            rows.push_back(std::make_pair(a.user.value(), a.createdAt.value()));
+        }
+        json list = json::array();
+        for (auto& r : rows) list.push_back(admin_request_to_json(db, r.first, r.second));
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["request_list"] = list;
+        ret["total_count"] = list.size();
+        return ret;
+    }
+
+    static inline json account_admin_approve(sql::connection& db, const json& body,
+                                             const std::string& skey, const Request& req)
+    {
+        std::string user = admin_user(db, skey);
+        std::string target = str_of(body, "user");
+        if (target == "") throw PasskeyError("invalid request");
+        if (!has_admin_request(db, target)) throw PasskeyError("unknown request");
+        const auto rtab = test::passkey::AdminRequest{};
+        const auto atab = test::passkey::Account{};
+        db(remove_from(rtab).where(rtab.user == target));
+        db(update(atab).set(atab.role = ROLE_ADMIN, atab.approvedBy = user,
+            atab.approvedAt = time_to_db(time(NULL))).where(atab.user == target));
+        AccountRow a;
+        get_account(db, target, a);
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["account"] = account_to_json(db, a);
+        return ret;
+    }
+
+    static inline json account_admin_reject(sql::connection& db, const json& body,
+                                            const std::string& skey, const Request& req)
+    {
+        admin_user(db, skey);
+        std::string target = str_of(body, "user");
+        if (target == "") throw PasskeyError("invalid request");
+        if (!has_admin_request(db, target)) throw PasskeyError("unknown request");
+        const auto tab = test::passkey::AdminRequest{};
+        db(remove_from(tab).where(tab.user == target));
+        json ret = json::object();
+        ret["status"] = "success";
+        ret["user"] = target;
         return ret;
     }
 
@@ -1210,6 +1316,12 @@ namespace passkey {
         approved_at DateTime,
         created_at DateTime)
         )");
+        db.execute(R"(
+        CREATE TABLE IF NOT EXISTS admin_request (
+        id int PRIMARY KEY AUTO_INCREMENT,
+        user TEXT NOT NULL,
+        created_at DateTime)
+        )");
 #else
         db.execute(R"(
         CREATE TABLE IF NOT EXISTS passkey (
@@ -1255,6 +1367,12 @@ namespace passkey {
         role TEXT,
         approved_by TEXT,
         approved_at TEXT,
+        created_at TEXT)
+        )");
+        db.execute(R"(
+        CREATE TABLE IF NOT EXISTS admin_request (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user TEXT NOT NULL,
         created_at TEXT)
         )");
 #endif
@@ -1323,7 +1441,12 @@ namespace passkey {
         add_route(svr, "/api/passkey/v0/list", passkey_list);
         add_route(svr, "/api/passkey/v0/delete", passkey_delete);
         add_route(svr, "/api/account/v0/list", account_list);
-        add_route(svr, "/api/account/v0/set_role", account_set_role);
+        add_route(svr, "/api/account/v0/demote", account_demote);
+        add_route(svr, "/api/account/v0/admin_request", account_admin_request);
+        add_route(svr, "/api/account/v0/admin_request_cancel", account_admin_request_cancel);
+        add_route(svr, "/api/account/v0/admin_requests", account_admin_requests);
+        add_route(svr, "/api/account/v0/admin_approve", account_admin_approve);
+        add_route(svr, "/api/account/v0/admin_reject", account_admin_reject);
         add_route(svr, "/api/account/v0/delete", account_delete);
         svr.Get("/", [](const Request& req, Response& res) {
             res.set_redirect("/html/index.html");

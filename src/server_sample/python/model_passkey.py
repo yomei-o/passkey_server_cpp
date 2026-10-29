@@ -65,6 +65,15 @@ class Account(Base):
     created_at = Column(DateTime)
 
 
+# 全体の管理者への申請。全体の管理者が承認すると account.role が admin になり、行は消える
+class AdminRequest(Base):
+    __tablename__ = "admin_request"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="ID")
+    user = Column(Text, nullable=False)
+    created_at = Column(DateTime)
+
+
 # ログイン中のセッション。skey が Bearer トークン、expire は naive な UTC
 class Session(Base):
     __tablename__ = "session"

@@ -158,7 +158,7 @@ def make_get(key, options, origin, rp_id=None, typ="webauthn.get", flags=UP | UV
 def reset_db(db_path):
     c = sqlite3.connect(db_path)
     for t in ("session", "passkey", "passkey_challenge", "switch_state", "account",
-              "tenant", "tenant_member"):
+              "tenant", "tenant_member", "admin_request"):
         c.execute("delete from " + t)
     c.commit()
     c.close()
@@ -397,17 +397,45 @@ def run(ck, post, db_path, origin):
     ck(accts.get("alice", {}).get("passkey_count") == 1 and accts.get("bob", {}).get("passkey_count") == 1,
        "passkey_count")
 
-    check_fail(post("/api/account/v0/set_role", {"user": "bob", "role": "admin"}, C), "admin only")
-    check_fail(post("/api/account/v0/set_role", {}, A), "invalid request")
-    check_fail(post("/api/account/v0/set_role", {"user": "carol"}, A), "invalid role")
-    check_fail(post("/api/account/v0/set_role", {"user": "nosuch", "role": "admin"}, A), "unknown account")
-    check_fail(post("/api/account/v0/set_role", {"user": "alice", "role": "member"}, A),
-               "last admin cannot be demoted")
-    r = post("/api/account/v0/set_role", {"user": "carol", "role": "admin"}, A)
-    ck(r.get("account", {}).get("role") == "admin", "alice makes carol an admin")
-    ck(post("/api/passkey/v0/me", {}, C).get("role") == "admin", "carol is an admin now")
-    r = post("/api/account/v0/set_role", {"user": "carol", "role": "member"}, C)
+    print("\n--- requests to become a global admin ---")
+    ck(post("/api/passkey/v0/me", {}, C).get("admin_requested") is False, "me: carol has not requested")
+    check_fail(post("/api/account/v0/admin_request", {}), "not logged in")
+    check_fail(post("/api/account/v0/admin_request", {}, A), "already admin")
+    check_fail(post("/api/account/v0/admin_request_cancel", {}, C), "unknown request")
+    r = post("/api/account/v0/admin_request", {}, C)
+    ck(r.get("status") == "success" and r.get("request", {}).get("user") == "carol"
+       and len(r["request"].get("created_at") or "") == 19, "carol requests to become a global admin")
+    check_fail(post("/api/account/v0/admin_request", {}, C), "already requested")
+    ck(post("/api/passkey/v0/me", {}, C).get("admin_requested") is True, "me: carol has requested")
+    ck(post("/api/account/v0/admin_request", {}, B).get("status") == "success", "bob requests too")
+    check_fail(post("/api/account/v0/admin_requests", {}, C), "admin only")
+    r = post("/api/account/v0/admin_requests", {}, A)
+    ck(r.get("status") == "success" and [x["user"] for x in r.get("request_list", [])] == ["carol", "bob"]
+       and r["request_list"][0].get("passkey_count") == 1, "the admin sees only the 2 requests")
+    check_fail(post("/api/account/v0/admin_approve", {"user": "carol"}, C), "admin only")
+    check_fail(post("/api/account/v0/admin_approve", {}, A), "invalid request")
+    check_fail(post("/api/account/v0/admin_approve", {"user": "alice"}, A), "unknown request")
+    r = post("/api/account/v0/admin_approve", {"user": "carol"}, A)
+    ck(r.get("account", {}).get("role") == "admin" and r["account"].get("approved_by") == "alice",
+       "alice approves carol")
+    me = post("/api/passkey/v0/me", {}, C)
+    ck(me.get("role") == "admin" and me.get("admin_requested") is False, "carol is an admin, request gone")
+    check_fail(post("/api/account/v0/admin_reject", {"user": "carol"}, A), "unknown request")
+    r = post("/api/account/v0/admin_reject", {"user": "bob"}, C)
+    ck(r.get("status") == "success", "carol (new admin) rejects bob")
+    ck(post("/api/passkey/v0/me", {}, B).get("role") == "member", "bob stays a member")
+    ck(post("/api/account/v0/admin_request", {}, B).get("status") == "success", "bob can ask again")
+    ck(post("/api/account/v0/admin_request_cancel", {}, B).get("status") == "success", "and withdraw it")
+    ck(post("/api/account/v0/admin_requests", {}, A).get("request_list") == [], "no requests left")
+
+    print("\n--- demoting global admins ---")
+    check_fail(post("/api/account/v0/demote", {"user": "carol"}, B), "admin only")
+    check_fail(post("/api/account/v0/demote", {}, A), "invalid request")
+    check_fail(post("/api/account/v0/demote", {"user": "nosuch"}, A), "unknown account")
+    check_fail(post("/api/account/v0/demote", {"user": "bob"}, A), "not an admin")
+    r = post("/api/account/v0/demote", {"user": "carol"}, C)
     ck(r.get("account", {}).get("role") == "member", "with 2 admins, carol can step down")
+    check_fail(post("/api/account/v0/demote", {"user": "alice"}, A), "last admin cannot be demoted")
 
     check_fail(post("/api/account/v0/delete", {"user": "bob"}, C), "admin only")
     check_fail(post("/api/account/v0/delete", {"user": "alice"}, A), "cannot delete yourself")
@@ -417,7 +445,9 @@ def run(ck, post, db_path, origin):
     rd = signup("dave", kd)
     D = rd.get("access_token", "")
     ck(rd.get("role") == "member", "dave signs up -> member")
+    ck(post("/api/account/v0/admin_request", {}, D).get("status") == "success", "dave requests admin")
     ck(post("/api/account/v0/delete", {"user": "dave"}, A).get("status") == "success", "the admin deletes dave")
+    ck(not sql(db_path, "select 1 from admin_request where user='dave'"), "dave's admin request is gone")
     check_fail(post("/api/passkey/v0/me", {}, D), "not logged in")
     login_fail("unknown credential", key=kd)
     ck(not sql(db_path, "select 1 from passkey where user='dave'"), "dave's passkeys are gone")
@@ -434,8 +464,9 @@ def run(ck, post, db_path, origin):
     check_fail(post("/api/passkey/v0/delete", {"credential_id": k1.id}, A), "last admin cannot leave")
     kf = SoftKey(-7)
     F = signup("frank", kf).get("access_token", "")
-    ck(post("/api/account/v0/set_role", {"user": "frank", "role": "admin"}, A).get("status") == "success",
-       "alice makes frank an admin")
+    ck(post("/api/account/v0/admin_request", {}, F).get("status") == "success"
+       and post("/api/account/v0/admin_approve", {"user": "frank"}, A).get("status") == "success",
+       "frank requests and alice approves him")
     r = post("/api/passkey/v0/delete", {"credential_id": k1.id}, A)
     ck(r.get("account_deleted") is True and post("/api/passkey/v0/me", {}, A).get("message") == "not logged in",
        "with another admin, alice can leave")

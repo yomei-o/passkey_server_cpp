@@ -28,6 +28,7 @@
   h1 { font-size: 1.5rem; margin: 0; }
   h1 a { color: inherit; text-decoration: none; }
   h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  h3 { font-size: .95rem; margin: 16px 0 4px; font-weight: 600; }
   .who { color: var(--muted); font-size: .95rem; }
   .who b { color: var(--fg); }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-top: 16px; }
@@ -155,9 +156,25 @@
     <div class="msg" id="msgTenants"></div>
   </section>
 
+  <!-- 一般のアカウント: 全体の管理者に申請する -->
+  <section class="card hidden" id="adminRequestCard">
+    <h2>全体の管理者</h2>
+    <div id="adminRequestBody"></div>
+    <div class="msg" id="msgAdminRequest"></div>
+  </section>
+
+  <!-- 全体の管理者: 申請の承認、管理者の一覧、アカウントの削除 -->
   <section class="card hidden" id="accountsCard">
-    <h2>アカウント（全体の管理者だけ）</h2>
-    <p class="note">全体の管理者は、テナントの追加・削除と、アカウントの削除ができます。</p>
+    <h2>全体の管理者の仕事</h2>
+    <p class="note">全体の管理者は、テナントの追加・削除、全体の管理者への申請の承認、アカウントの削除ができます。</p>
+    <h3 class="note">全体の管理者への申請</h3>
+    <div id="adminRequests"></div>
+    <h3 class="note">いまの全体の管理者</h3>
+    <div id="admins"></div>
+    <h3 class="note">アカウントを探して削除</h3>
+    <div class="row">
+      <input type="text" id="accountSearch" placeholder="ユーザー名（一部でも可）" maxlength="64">
+    </div>
     <div id="accounts"></div>
     <div class="msg" id="msgAccounts"></div>
   </section>
@@ -401,15 +418,18 @@ async function logout() {
 // ---------- 画面の更新 ----------
 let me = "";
 let myRole = null;
+let myAdminRequested = false;
 
 async function refreshMe(quiet) {
   me = "";
   myRole = null;
+  myAdminRequested = false;
   if (token) {
     const r = await api("/api/passkey/v0/me", {}, quiet);
     if (r.status === "success") {
       me = r.user;
       myRole = r.role;
+      myAdminRequested = r.admin_requested;
     } else {
       setToken("");
     }
@@ -418,6 +438,8 @@ async function refreshMe(quiet) {
   $("loggedIn").classList.toggle("hidden", !me);
   $("tenantsCard").classList.toggle("hidden", !me);
   $("accountsCard").classList.toggle("hidden", myRole !== "admin");
+  $("adminRequestCard").classList.toggle("hidden", !me || myRole === "admin");
+  renderAdminRequestCard();
   $("addTenant").classList.toggle("hidden", myRole !== "admin");
   $("tenantsTitle").textContent = myRole === "admin" ? "テナント（全体の管理者には全部見えます）" : "あなたのテナント";
   $("who").innerHTML = "";
@@ -635,35 +657,120 @@ async function deleteTenant(t) {
   await refreshAll();
 }
 
-// ---------- アカウント（全体の管理者） ----------
-async function refreshAccounts(quiet) {
-  const r = await api("/api/account/v0/list", {}, quiet);
-  const box = $("accounts");
-  if (r.status !== "success") return;
-  render(box, JSON.stringify(r.account_list), () => {
-    for (const a of r.account_list) {
-      const left = el("div", {}, el("b", { text: a.user }),
-        a.user === me ? badge("自分", "me") : null,
-        a.role === "admin" ? badge("全体の管理者", "admin") : null,
-        el("div", { class: "meta", text: "登録 " + utcToLocal(a.created_at) + " ・ パスキー " + a.passkey_count + " 個" }));
-      const btns = el("div", { class: "row" },
-        el("button", { text: a.role === "admin" ? "一般にする" : "管理者にする",
-          onclick: () => setRole(a.user, a.role === "admin" ? "member" : "admin") }));
-      if (a.user !== me) {
-        btns.append(el("button", { class: "danger", text: "削除", onclick: () => deleteAccount(a) }));
-      }
-      box.append(el("div", { class: "item" }, left, btns));
+// ---------- 全体の管理者への申請（一般のアカウント） ----------
+function renderAdminRequestCard() {
+  const box = $("adminRequestBody");
+  render(box, JSON.stringify([me, myRole, myAdminRequested]), () => {
+    if (!me || myRole === "admin") return;
+    if (myAdminRequested) {
+      box.append(
+        el("p", { text: "全体の管理者に申請中です。全体の管理者が承認すると、このページを開いたままでテナントの追加などができるようになります。" }),
+        el("div", { class: "row" }, el("button", { text: "申請を取り下げる", onclick: cancelAdminRequest })));
+    } else {
+      box.append(
+        el("p", { class: "note", text: "全体の管理者になると、テナントの追加・削除などができます。申請すると、いまの全体の管理者が承認します。" }),
+        el("div", { class: "row" }, el("button", { id: "btnAdminRequest", text: "全体の管理者に申請", onclick: requestAdmin })));
     }
   });
 }
 
-async function setRole(user, role) {
-  const r = await api("/api/account/v0/set_role", { user, role });
+async function requestAdmin() {
+  const r = await api("/api/account/v0/admin_request", {});
+  if (r.status !== "success") return showMsg("msgAdminRequest", "申請できません: " + r.message, "err");
+  showMsg("msgAdminRequest", "全体の管理者に申請しました", "ok");
+  await refreshAll();
+}
+
+async function cancelAdminRequest() {
+  const r = await api("/api/account/v0/admin_request_cancel", {});
+  if (r.status !== "success") return showMsg("msgAdminRequest", "取り下げられません: " + r.message, "err");
+  showMsg("msgAdminRequest", "申請を取り下げました", "ok");
+  await refreshAll();
+}
+
+// ---------- 全体の管理者の仕事 ----------
+let accountList = [];
+
+async function refreshAccounts(quiet) {
+  const [q, a] = await Promise.all([
+    api("/api/account/v0/admin_requests", {}, quiet),
+    api("/api/account/v0/list", {}, quiet),
+  ]);
+  if (q.status === "success") {
+    const box = $("adminRequests");
+    render(box, JSON.stringify(q.request_list), () => {
+      if (q.request_list.length === 0) box.append(el("p", { class: "note", text: "申請はありません。" }));
+      for (const x of q.request_list) {
+        box.append(el("div", { class: "item" },
+          el("div", {}, el("b", { text: x.user }), badge("申請中", "pending"),
+            el("div", { class: "meta", text: "申請 " + utcToLocal(x.created_at) + " ・ パスキー " + x.passkey_count + " 個" })),
+          el("div", { class: "row" },
+            el("button", { class: "primary", text: "承認", onclick: () => approveAdmin(x.user) }),
+            el("button", { class: "danger", text: "却下", onclick: () => rejectAdmin(x.user) }))));
+      }
+    });
+  }
+  if (a.status === "success") {
+    accountList = a.account_list;
+    const admins = accountList.filter(x => x.role === "admin");
+    const box = $("admins");
+    render(box, JSON.stringify([me, admins]), () => {
+      for (const x of admins) {
+        box.append(el("div", { class: "item" },
+          el("div", {}, el("b", { text: x.user }), x.user === me ? badge("自分", "me") : null,
+            el("div", { class: "meta", text: x.approved_by && x.approved_by !== x.user
+              ? x.approved_by + " が承認（" + utcToLocal(x.approved_at) + "）" : "最初の管理者" })),
+          el("div", { class: "row" },
+            el("button", { text: x.user === me ? "自分を一般に戻す" : "一般に戻す", onclick: () => demote(x.user) }))));
+      }
+    });
+    renderAccountSearch();
+  }
+}
+
+// 名前で絞り込んだアカウントだけを出す（何百人いても一覧から探さなくてよいように）
+function renderAccountSearch() {
+  const box = $("accounts");
+  const q = $("accountSearch").value.trim().toLowerCase();
+  const hits = q ? accountList.filter(x => x.user.toLowerCase().includes(q)) : [];
+  render(box, JSON.stringify([me, q, hits]), () => {
+    if (!q) return;
+    if (hits.length === 0) box.append(el("p", { class: "note", text: "見つかりません。" }));
+    for (const x of hits.slice(0, 20)) {
+      const btns = el("div", { class: "row" });
+      if (x.user !== me) btns.append(el("button", { class: "danger", text: "削除", onclick: () => deleteAccount(x) }));
+      box.append(el("div", { class: "item" },
+        el("div", {}, el("b", { text: x.user }), x.user === me ? badge("自分", "me") : null,
+          x.role === "admin" ? badge("全体の管理者", "admin") : null,
+          el("div", { class: "meta", text: "登録 " + utcToLocal(x.created_at) + " ・ パスキー " + x.passkey_count + " 個" })),
+        btns));
+    }
+    if (hits.length > 20) box.append(el("p", { class: "note", text: "ほか " + (hits.length - 20) + " 件。もう少し絞り込んでください。" }));
+  });
+}
+
+async function approveAdmin(user) {
+  const r = await api("/api/account/v0/admin_approve", { user });
+  if (r.status !== "success") return showMsg("msgAccounts", "承認できません: " + r.message, "err");
+  showMsg("msgAccounts", user + " を全体の管理者にしました", "ok");
+  await refreshAll();
+}
+
+async function rejectAdmin(user) {
+  const r = await api("/api/account/v0/admin_reject", { user });
+  if (r.status !== "success") return showMsg("msgAccounts", "却下できません: " + r.message, "err");
+  showMsg("msgAccounts", user + " の申請を却下しました", "ok");
+  await refreshAll();
+}
+
+async function demote(user) {
+  if (user === me && !confirm("自分を一般に戻しますか？（テナントの追加などができなくなります）")) return;
+  const r = await api("/api/account/v0/demote", { user });
   if (r.message === "last admin cannot be demoted") {
-    return showMsg("msgAccounts", "全体の管理者が 1 人もいなくなるので、一般にはできません", "err");
+    return showMsg("msgAccounts", "全体の管理者が 1 人もいなくなるので、一般には戻せません", "err");
   }
   if (r.status !== "success") return showMsg("msgAccounts", "変更できません: " + r.message, "err");
-  showMsg("msgAccounts", user + " を" + (role === "admin" ? "全体の管理者" : "一般") + "にしました", "ok");
+  showMsg("msgAccounts", user + " を一般に戻しました", "ok");
   await refreshAll();
 }
 
@@ -745,6 +852,7 @@ $("btnLogout").onclick = logout;
 $("btnAddTenant").onclick = addTenant;
 $("user").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
 $("tenantNew").addEventListener("keydown", (e) => { if (e.key === "Enter") addTenant(); });
+$("accountSearch").addEventListener("input", renderAccountSearch);
 
 if (!supported()) {
   showMsg("msgOut", window.isSecureContext

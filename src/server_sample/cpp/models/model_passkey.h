@@ -664,5 +664,75 @@ namespace passkey
       };
     };
   };
+  namespace AdminRequest_
+  {
+    struct Id
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "id";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T id;
+            T& operator()() { return id; }
+            const T& operator()() const { return id; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::integer, sqlpp::tag::must_not_insert, sqlpp::tag::must_not_update, sqlpp::tag::can_be_null>;
+    };
+    struct User
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "user";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T user;
+            T& operator()() { return user; }
+            const T& operator()() const { return user; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::require_insert>;
+    };
+    struct CreatedAt
+    {
+      struct _alias_t
+      {
+        static constexpr const char _literal[] =  "created_at";
+        using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+        template<typename T>
+        struct _member_t
+          {
+            T createdAt;
+            T& operator()() { return createdAt; }
+            const T& operator()() const { return createdAt; }
+          };
+      };
+      using _traits = sqlpp::make_traits<sqlpp::text, sqlpp::tag::can_be_null>;
+    };
+  } // namespace AdminRequest_
+
+  struct AdminRequest: sqlpp::table_t<AdminRequest,
+               AdminRequest_::Id,
+               AdminRequest_::User,
+               AdminRequest_::CreatedAt>
+  {
+    struct _alias_t
+    {
+      static constexpr const char _literal[] =  "admin_request";
+      using _name_t = sqlpp::make_char_sequence<sizeof(_literal), _literal>;
+      template<typename T>
+      struct _member_t
+      {
+        T adminRequest;
+        T& operator()() { return adminRequest; }
+        const T& operator()() const { return adminRequest; }
+      };
+    };
+  };
 } // namespace passkey
 } // namespace test

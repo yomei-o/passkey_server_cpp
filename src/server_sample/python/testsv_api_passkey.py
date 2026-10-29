@@ -11,10 +11,17 @@
 #   /api/passkey/v0/delete             自分のパスキーを削除（最後の 1 本ならアカウントごと消える）
 #
 #   /api/account/v0/list               全アカウントの一覧（全体の管理者だけ）
-#   /api/account/v0/set_role           アカウントを全体の管理者 / 一般にする（全体の管理者だけ）
 #   /api/account/v0/delete             自分以外のアカウントを消す（全体の管理者だけ）
+#   /api/account/v0/demote             全体の管理者を一般に戻す（全体の管理者だけ。自分も可）
+#
+#   /api/account/v0/admin_request          全体の管理者に申請する（ログインしていれば誰でも）
+#   /api/account/v0/admin_request_cancel   自分の申請を取り下げる
+#   /api/account/v0/admin_requests         申請の一覧（全体の管理者だけ）
+#   /api/account/v0/admin_approve          申請を承認して全体の管理者にする（全体の管理者だけ）
+#   /api/account/v0/admin_reject           申請を却下する（全体の管理者だけ）
 #
 # 誰でも登録できる。最初の 1 人は全体の管理者（テナントの追加・削除ができる）、2 人目からは一般。
+# 2 人目からの全体の管理者は、本人が申請して、全体の管理者が承認する（一覧から選んで上げることはしない）。
 # 電気を操作できるかどうかはテナントのメンバーかどうかで決まる（testsv_api_tenant.py）。
 #
 # C++ 版は cpp/main/testsv_api_passkey.h。検査の順番と失敗時の message を揃えてある。
@@ -493,6 +500,7 @@ def delete_account(db: Session, user: str):
     db.query(model_passkey.Passkey).filter(model_passkey.Passkey.user == user).delete()
     db.query(model_passkey.Session).filter(model_passkey.Session.user == user).delete()
     db.query(model_passkey.Account).filter(model_passkey.Account.user == user).delete()
+    db.query(model_passkey.AdminRequest).filter(model_passkey.AdminRequest.user == user).delete()
     db.query(model_tenant.TenantMember).filter(model_tenant.TenantMember.user == user).delete()
     db.commit()
 
@@ -739,6 +747,7 @@ def passkey_me(db: Session, skey: str) -> dict:
     if s is None:
         raise PasskeyError("not logged in")
     return {"status": "success", "user": s.user, "role": role_of(db, s.user),
+            "admin_requested": get_admin_request(db, s.user) is not None,
             "expire": format_time(s.expire)}
 
 
@@ -795,24 +804,100 @@ def account_list(db: Session, skey: str) -> dict:
     }
 
 
-# {user, role}。role は "admin"（全体の管理者）か "member"（一般）。
-# 全体の管理者が 1 人もいなくなる変更はできない
-def account_set_role(db: Session, skey: str, body: dict) -> dict:
+# {user}。全体の管理者を一般に戻す（自分でもよい）。全体の管理者が 1 人もいなくなる変更はできない
+def account_demote(db: Session, skey: str, body: dict) -> dict:
     admin_user(db, skey)
     target = body.get("user")
     if not isinstance(target, str) or not target:
         raise PasskeyError("invalid request")
-    role = body.get("role")
-    if role not in (ROLE_ADMIN, ROLE_MEMBER):
-        raise PasskeyError("invalid role")
     a = get_account(db, target)
     if a is None:
         raise PasskeyError("unknown account")
-    if a.role == ROLE_ADMIN and role == ROLE_MEMBER and admin_count(db) == 1:
+    if a.role != ROLE_ADMIN:
+        raise PasskeyError("not an admin")
+    if admin_count(db) == 1:
         raise PasskeyError("last admin cannot be demoted")
-    a.role = role
+    a.role = ROLE_MEMBER
     db.commit()
     return {"status": "success", "account": account_to_dict(db, a)}
+
+
+#
+# 全体の管理者への申請
+#
+
+def get_admin_request(db: Session, user: str):
+    return db.query(model_passkey.AdminRequest).filter(model_passkey.AdminRequest.user == user).first()
+
+
+def admin_request_to_dict(db: Session, r) -> dict:
+    return {
+        "user": r.user,
+        "created_at": format_time(r.created_at),
+        "passkey_count": len(get_user_passkeys(db, r.user)),
+    }
+
+
+def account_admin_request(db: Session, skey: str) -> dict:
+    user = session_user(db, skey)
+    if role_of(db, user) == ROLE_ADMIN:
+        raise PasskeyError("already admin")
+    if get_admin_request(db, user) is not None:
+        raise PasskeyError("already requested")
+    r = model_passkey.AdminRequest(user=user, created_at=utcnow())
+    db.add(r)
+    db.commit()
+    return {"status": "success", "request": admin_request_to_dict(db, r)}
+
+
+def account_admin_request_cancel(db: Session, skey: str) -> dict:
+    user = session_user(db, skey)
+    r = get_admin_request(db, user)
+    if r is None:
+        raise PasskeyError("unknown request")
+    db.delete(r)
+    db.commit()
+    return {"status": "success", "user": user}
+
+
+def account_admin_requests(db: Session, skey: str) -> dict:
+    admin_user(db, skey)
+    rows = db.query(model_passkey.AdminRequest).order_by(model_passkey.AdminRequest.id).all()
+    return {
+        "status": "success",
+        "request_list": [admin_request_to_dict(db, r) for r in rows],
+        "total_count": len(rows),
+    }
+
+
+def account_admin_approve(db: Session, skey: str, body: dict) -> dict:
+    user = admin_user(db, skey)
+    target = body.get("user")
+    if not isinstance(target, str) or not target:
+        raise PasskeyError("invalid request")
+    r = get_admin_request(db, target)
+    if r is None:
+        raise PasskeyError("unknown request")
+    a = get_account(db, target)
+    db.delete(r)
+    a.role = ROLE_ADMIN
+    a.approved_by = user
+    a.approved_at = utcnow()
+    db.commit()
+    return {"status": "success", "account": account_to_dict(db, a)}
+
+
+def account_admin_reject(db: Session, skey: str, body: dict) -> dict:
+    admin_user(db, skey)
+    target = body.get("user")
+    if not isinstance(target, str) or not target:
+        raise PasskeyError("invalid request")
+    r = get_admin_request(db, target)
+    if r is None:
+        raise PasskeyError("unknown request")
+    db.delete(r)
+    db.commit()
+    return {"status": "success", "user": target}
 
 
 # 自分以外のアカウントを消す（管理者も消せる。自分は消せないので管理者は 1 人以上残る）。
@@ -931,13 +1016,55 @@ async def api_account_list(request: Request,
     return run(db, account_list, extract_bearer_token(authorization))
 
 
-@router.post("/account/v0/set_role")
-async def api_account_set_role(request: Request,
+@router.post("/account/v0/demote")
+async def api_account_demote(request: Request,
     authorization: str = Header(None),
     db: Session = Depends(get_db),
     ):
     body = await read_body(request)
-    return run(db, account_set_role, extract_bearer_token(authorization), body)
+    return run(db, account_demote, extract_bearer_token(authorization), body)
+
+
+@router.post("/account/v0/admin_request")
+async def api_account_admin_request(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    return run(db, account_admin_request, extract_bearer_token(authorization))
+
+
+@router.post("/account/v0/admin_request_cancel")
+async def api_account_admin_request_cancel(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    return run(db, account_admin_request_cancel, extract_bearer_token(authorization))
+
+
+@router.post("/account/v0/admin_requests")
+async def api_account_admin_requests(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    return run(db, account_admin_requests, extract_bearer_token(authorization))
+
+
+@router.post("/account/v0/admin_approve")
+async def api_account_admin_approve(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    body = await read_body(request)
+    return run(db, account_admin_approve, extract_bearer_token(authorization), body)
+
+
+@router.post("/account/v0/admin_reject")
+async def api_account_admin_reject(request: Request,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+    ):
+    body = await read_body(request)
+    return run(db, account_admin_reject, extract_bearer_token(authorization), body)
 
 
 @router.post("/account/v0/delete")
