@@ -138,15 +138,18 @@
   </section>
 
   <section class="card" id="loggedOut">
-    <h2>ログイン / 新規登録</h2>
-    <div class="row">
-      <input type="text" id="user" placeholder="ユーザー名" autocomplete="username webauthn" maxlength="64">
-    </div>
+    <h2>ログイン</h2>
     <div class="row">
       <button class="primary" id="btnLogin">パスキーでログイン</button>
+    </div>
+    <p class="note">名前の入力は要りません。端末に保存されたパスキーを選んで、顔・指紋・画面ロックなどで本人確認します。
+      一度ログインすると、この端末のこのブラウザでは 24 時間ログインしたままになります。</p>
+    <h3>はじめての人（新規登録）</h3>
+    <div class="row">
+      <input type="text" id="user" placeholder="使いたいユーザー名" autocomplete="username" maxlength="64">
       <button id="btnSignup">この名前で新規登録</button>
     </div>
-    <p class="note">ログインはユーザー名を空のままでもできます（端末に保存されたパスキーから選びます）。
+    <p class="note">登録するとこの端末にパスキーが作られ、そのままログインします。
       最初に登録した人は全体の管理者になり、テナントを追加できます。</p>
     <div class="msg" id="msgOut"></div>
   </section>
@@ -216,7 +219,8 @@
 
 const TOKEN_KEY = "access_token";
 let token = "";
-try { token = sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) {}
+// localStorage に置く（タブを閉じたり QR コードから開き直してもログインしたまま。サーバ側のセッションは 24 時間）
+try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) {}
 
 // ?tenant=<guid> で開いたときのテナント
 const TENANT = new URLSearchParams(location.search).get("tenant") || "";
@@ -307,8 +311,8 @@ async function api(path, body, quiet) {
 function setToken(t) {
   token = t || "";
   try {
-    if (token) sessionStorage.setItem(TOKEN_KEY, token);
-    else sessionStorage.removeItem(TOKEN_KEY);
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
   } catch (e) {}
 }
 
@@ -386,13 +390,10 @@ async function register(mode) {
 
 async function login() {
   if (!supported()) return showMsg("msgOut", "このブラウザ（またはこの URL）ではパスキーを使えません", "err");
-  const user = $("user").value.trim();
+  // 名前は聞かない。allowCredentials を空にして、端末に保存されたパスキーから選んでもらう
   setToken("");
-  const o = await api("/api/passkey/v0/login_options", user ? { user } : {});
+  const o = await api("/api/passkey/v0/login_options", {});
   if (o.status !== "success") return showMsg("msgOut", "ログインできません: " + o.message, "err");
-  if (user && o.publicKey.allowCredentials.length === 0) {
-    return showMsg("msgOut", "その名前のパスキーは登録されていません", "err");
-  }
   let cred;
   try {
     showMsg("msgOut", "端末の指示に従ってください…");
@@ -890,7 +891,7 @@ $("btnLogin").onclick = login;
 $("btnAdd").onclick = () => register("add");
 $("btnLogout").onclick = logout;
 $("btnAddTenant").onclick = addTenant;
-$("user").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+$("user").addEventListener("keydown", (e) => { if (e.key === "Enter") register("signup"); });
 $("tenantNew").addEventListener("keydown", (e) => { if (e.key === "Enter") addTenant(); });
 $("accountSearch").addEventListener("input", renderAccountSearch);
 

@@ -109,6 +109,12 @@ with sync_playwright() as p:
     wait_text(owner, "#msgTenant", "管理者です")
     owner.wait_for_selector("#toggle", timeout=8000)
     ck(owner.locator("#tenantMembersCard").is_visible(), "the tenant admin sees the member list")
+    tab = owner.context.new_page()          # QR から開き直したとき（同じブラウザの別のタブ）
+    tab.goto(url)
+    wait_text(tab, "#who", OWNER)
+    tab.wait_for_selector("#toggle", timeout=8000)
+    ck(tab.locator("#loggedOut").is_hidden(), "a new tab in the same browser stays logged in (no name, no passkey)")
+    tab.close()
     owner.wait_for_selector("#tenantInvite svg", timeout=8000)
     check_qr(owner.locator("#tenantInvite svg"), url, "the tenant admin's invite QR code reads back as the URL")
     before = "ついています" in owner.inner_text("#state")
