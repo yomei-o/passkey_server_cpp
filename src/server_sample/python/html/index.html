@@ -26,10 +26,12 @@
   main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
   header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   h1 { font-size: 1.5rem; margin: 0; }
+  h1 a { color: inherit; text-decoration: none; }
   h2 { font-size: 1.1rem; margin: 0 0 12px; }
   .who { color: var(--muted); font-size: .95rem; }
   .who b { color: var(--fg); }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-top: 16px; }
+  .card.pending { border-color: var(--glow); }
   .lead { color: var(--muted); margin: 6px 0 0; }
   button {
     font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg);
@@ -46,8 +48,9 @@
   .msg { min-height: 1.6em; margin-top: 10px; font-size: .95rem; }
   .msg.err { color: var(--danger); }
   .msg.ok { color: var(--ok); }
+  a { color: var(--accent); }
 
-  /* スイッチ */
+  /* 電気 */
   .light { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
   .bulb {
     width: 96px; height: 96px; border-radius: 50%; background: var(--bulb-off);
@@ -66,6 +69,21 @@
   .toggle.on { background: var(--accent); }
   .toggle.on::after { left: 36px; }
 
+  /* 一覧 */
+  .item { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+          flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--line); }
+  .item:first-child { border-top: none; }
+  .item .meta { font-size: .85rem; color: var(--muted); word-break: break-all; }
+  .item .row { margin-top: 0; }
+  .badge { display: inline-block; font-size: .75rem; padding: 1px 8px; border-radius: 999px;
+           margin-left: 6px; border: 1px solid var(--line); color: var(--muted); }
+  .badge.pending { border-color: var(--glow); color: var(--fg); }
+  .badge.me { border-color: var(--accent); color: var(--accent); }
+  .badge.admin { border-color: var(--ok); color: var(--ok); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+         background: var(--bulb-off); margin-right: 6px; vertical-align: middle; }
+  .dot.on { background: var(--glow); }
+
   table { width: 100%; border-collapse: collapse; font-size: .85rem; }
   th, td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-weight: 600; white-space: nowrap; width: 9.5em; }
@@ -78,16 +96,6 @@
     font-size: .8rem; max-height: 360px; margin: 8px 0 0;
   }
   details summary { cursor: pointer; color: var(--muted); }
-  .card.pending { border-color: var(--glow); }
-  .member { display: flex; justify-content: space-between; align-items: center; gap: 8px;
-            flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--line); }
-  .member:first-child { border-top: none; }
-  .member .meta { font-size: .85rem; color: var(--muted); }
-  .badge { display: inline-block; font-size: .75rem; padding: 1px 8px; border-radius: 999px;
-           margin-left: 6px; border: 1px solid var(--line); color: var(--muted); }
-  .badge.pending { border-color: var(--glow); color: var(--fg); }
-  .badge.me { border-color: var(--accent); color: var(--accent); }
-  .badge.admin { border-color: var(--ok); color: var(--ok); }
   .note { font-size: .9rem; color: var(--muted); }
   .hidden { display: none !important; }
 </style>
@@ -95,28 +103,28 @@
 <body>
 <main>
   <header>
-    <h1>パスキー デモ</h1>
+    <h1><a href="index.html">パスキー デモ</a></h1>
     <div class="who" id="who">ログインしていません</div>
   </header>
   <p class="lead">
-    パスキー（WebAuthn）でログインした、承認済みのメンバーだけが、みんなで共有している電気のスイッチを切り替えられます。
-    スマホなら顔や指紋、PC なら Windows Hello などで本人確認します。
-    最初に登録した人は自動で管理者になり、2 人目からは管理者が「管理者」か「一般」として許可します。
+    パスキー（WebAuthn）でログインして、自分のテナントの電気をオン・オフします。
+    テナントには、管理者から渡された URL（<code>?tenant=…</code>）を開いて参加申請します。
   </p>
 
-  <section class="card">
-    <h2>みんなの電気</h2>
-    <div class="light">
-      <div class="bulb" id="bulb" aria-hidden="true"></div>
-      <div>
-        <div class="state" id="state">…</div>
-        <div class="note" id="lastBy"></div>
-        <div class="row">
-          <button class="toggle" id="toggle" aria-label="スイッチ" disabled></button>
-          <span class="note" id="toggleHint">ログインすると切り替えられます</span>
-        </div>
-      </div>
-    </div>
+  <!-- URL でテナントを指定したとき -->
+  <section class="card hidden" id="tenantCard">
+    <h2 id="tenantName">テナント</h2>
+    <div id="tenantBody"></div>
+    <div class="msg" id="msgTenant"></div>
+  </section>
+
+  <section class="card hidden" id="tenantMembersCard">
+    <h2>テナントのメンバー</h2>
+    <p class="note">
+      このテナントの管理者は、参加申請を「管理者」か「一般」として承認したり、却下・外したりできます。
+    </p>
+    <div id="tenantMembers"></div>
+    <div class="msg" id="msgMembers"></div>
   </section>
 
   <section class="card" id="loggedOut">
@@ -128,26 +136,30 @@
       <button class="primary" id="btnLogin">パスキーでログイン</button>
       <button id="btnSignup">この名前で新規登録</button>
     </div>
-    <p class="note">ログインはユーザー名を空のままでもできます（端末に保存されたパスキーから選びます）。</p>
+    <p class="note">ログインはユーザー名を空のままでもできます（端末に保存されたパスキーから選びます）。
+      最初に登録した人は全体の管理者になり、テナントを追加できます。</p>
     <div class="msg" id="msgOut"></div>
   </section>
 
-  <section class="card hidden pending" id="pendingCard">
-    <h2>承認待ちです</h2>
-    <p class="note">
-      登録とログインはできていますが、スイッチを使うには、管理者に「許可」してもらう必要があります。
-      許可されると、このページを開いたままで使えるようになります。
-    </p>
+  <section class="card hidden" id="tenantsCard">
+    <h2 id="tenantsTitle">あなたのテナント</h2>
+    <div id="tenants"></div>
+    <div class="hidden" id="addTenant">
+      <div class="row">
+        <input type="text" id="tenantNew" placeholder="テナント名" maxlength="64">
+        <button id="btnAddTenant">テナントを追加</button>
+      </div>
+      <p class="note">追加すると URL ができます。その URL をテナントの人に渡してください。
+        最初に参加申請した人が、そのテナントの管理者になります。</p>
+    </div>
+    <div class="msg" id="msgTenants"></div>
   </section>
 
-  <section class="card hidden" id="membersCard">
-    <h2>メンバー</h2>
-    <p class="note">
-      最初に登録した人は自動で管理者になります。2 人目からは、管理者が「管理者」か「一般」として許可するまで承認待ちです。
-      許可と、自分以外のアカウントの削除（承認待ちの人なら却下）は管理者だけができます。
-    </p>
-    <div id="members"></div>
-    <div class="msg" id="msgMembers"></div>
+  <section class="card hidden" id="accountsCard">
+    <h2>アカウント（全体の管理者だけ）</h2>
+    <p class="note">全体の管理者は、テナントの追加・削除と、アカウントの削除ができます。</p>
+    <div id="accounts"></div>
+    <div class="msg" id="msgAccounts"></div>
   </section>
 
   <section class="card hidden" id="loggedIn">
@@ -179,7 +191,11 @@ const TOKEN_KEY = "access_token";
 let token = "";
 try { token = sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) {}
 
+// ?tenant=<guid> で開いたときのテナント
+const TENANT = new URLSearchParams(location.search).get("tenant") || "";
+
 const $ = (id) => document.getElementById(id);
+const ROLE_LABEL = { admin: "管理者", member: "一般" };
 
 // ---------- base64url <-> ArrayBuffer ----------
 function b64uToBuf(s) {
@@ -248,12 +264,13 @@ function log(title, obj) {
   $("log").textContent = logLines.join("\n\n");
 }
 
-async function api(path, body, withToken) {
+// quiet: 定期確認のときは通信ログに出さない
+async function api(path, body, quiet) {
   const h = { "Content-Type": "application/json" };
-  if (withToken && token) h.Authorization = "Bearer " + token;
+  if (token) h.Authorization = "Bearer " + token;
   const res = await fetch(path, { method: "POST", headers: h, body: JSON.stringify(body || {}) });
   const j = await res.json();
-  if (path.indexOf("/switch/v0/get") < 0) {
+  if (!quiet) {
     log("→ " + path, body || {});
     log("← " + path, j);
   }
@@ -274,6 +291,32 @@ function showMsg(id, text, kind) {
   el.className = "msg" + (kind ? " " + kind : "");
 }
 
+function el(tag, attrs, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v;
+    else if (k === "onclick") e.onclick = v;
+    else if (k === "text") e.textContent = v;
+    else e.setAttribute(k, v);
+  }
+  for (const c of children) if (c != null) e.append(c);
+  return e;
+}
+
+function badge(text, cls) {
+  return el("span", { class: "badge" + (cls ? " " + cls : ""), text });
+}
+
+function utcToLocal(s) {
+  if (!s) return "";
+  const d = new Date(s.replace(" ", "T") + "Z");
+  return isNaN(d) ? s : d.toLocaleString();
+}
+
+function tenantUrl(guid) {
+  return location.origin + location.pathname + "?tenant=" + guid;
+}
+
 // WebAuthn のエラーを人が読める文に
 function webauthnError(e) {
   if (!e) return "失敗しました";
@@ -292,7 +335,8 @@ async function register(mode) {
   const msgId = mode === "add" ? "msgIn" : "msgOut";
   if (!supported()) return showMsg(msgId, "このブラウザ（またはこの URL）ではパスキーを使えません", "err");
   const body = mode === "add" ? {} : { user: $("user").value.trim() };
-  const o = await api("/api/passkey/v0/register_options", body, mode === "add");
+  if (mode !== "add") setToken("");
+  const o = await api("/api/passkey/v0/register_options", body);
   if (o.status !== "success") return showMsg(msgId, "登録できません: " + o.message, "err");
   let cred;
   try {
@@ -303,19 +347,20 @@ async function register(mode) {
   }
   const payload = credToJSON(cred);
   payload.name = deviceName();
-  const r = await api("/api/passkey/v0/register_verify", payload, mode === "add");
+  const r = await api("/api/passkey/v0/register_verify", payload);
   if (r.status !== "success") return showMsg(msgId, "サーバが受け付けませんでした: " + r.message, "err");
   if (r.access_token) setToken(r.access_token);
   showMsg("msgOut", "");
-  await refreshMe();
+  await refreshAll();
   showMsg("msgIn", mode === "add" ? "パスキーを追加しました"
-    : r.approved ? "登録してログインしました（最初のメンバーなので管理者です）"
-    : "登録してログインしました（管理者の許可待ちです）", "ok");
+    : r.role === "admin" ? "登録してログインしました（最初のメンバーなので全体の管理者です）"
+    : "登録してログインしました", "ok");
 }
 
 async function login() {
   if (!supported()) return showMsg("msgOut", "このブラウザ（またはこの URL）ではパスキーを使えません", "err");
   const user = $("user").value.trim();
+  setToken("");
   const o = await api("/api/passkey/v0/login_options", user ? { user } : {});
   if (o.status !== "success") return showMsg("msgOut", "ログインできません: " + o.message, "err");
   if (user && o.publicKey.allowCredentials.length === 0) {
@@ -332,7 +377,7 @@ async function login() {
   if (r.status !== "success") return showMsg("msgOut", "ログインできませんでした: " + r.message, "err");
   setToken(r.access_token);
   showMsg("msgOut", "");
-  await refreshMe();
+  await refreshAll();
   showMsg("msgIn", "ログインしました", "ok");
 }
 
@@ -347,140 +392,290 @@ function deviceName() {
   return "passkey";
 }
 
-// ---------- 画面 ----------
-function utcToLocal(s) {
-  if (!s) return "";
-  const d = new Date(s.replace(" ", "T") + "Z");
-  return isNaN(d) ? s : d.toLocaleString();
+async function logout() {
+  await api("/api/passkey/v0/logout", {});
+  setToken("");
+  await refreshAll();
 }
 
+// ---------- 画面の更新 ----------
 let me = "";
-let approved = false;
-let role = null;
+let myRole = null;
 
-const ROLE_LABEL = { admin: "管理者", member: "一般" };
-
-// quiet: 定期確認のときは通信ログに出さない
 async function refreshMe(quiet) {
-  const was = me + "/" + approved + "/" + role;
   me = "";
-  approved = false;
-  role = null;
+  myRole = null;
   if (token) {
-    const r = quiet ? await apiQuiet("/api/passkey/v0/me", {}) : await api("/api/passkey/v0/me", {}, true);
+    const r = await api("/api/passkey/v0/me", {}, quiet);
     if (r.status === "success") {
       me = r.user;
-      approved = r.approved;
-      role = r.role;
+      myRole = r.role;
     } else {
       setToken("");
     }
   }
-  if (quiet && was === me + "/" + approved + "/" + role) {
-    if (approved) await refreshMembers(true);
-    return;
-  }
   $("loggedOut").classList.toggle("hidden", !!me);
   $("loggedIn").classList.toggle("hidden", !me);
-  $("pendingCard").classList.toggle("hidden", !me || approved);
-  $("membersCard").classList.toggle("hidden", !approved);
+  $("tenantsCard").classList.toggle("hidden", !me);
+  $("accountsCard").classList.toggle("hidden", myRole !== "admin");
+  $("addTenant").classList.toggle("hidden", myRole !== "admin");
+  $("tenantsTitle").textContent = myRole === "admin" ? "テナント（全体の管理者には全部見えます）" : "あなたのテナント";
   $("who").innerHTML = "";
   if (me) {
-    const b = document.createElement("b");
-    b.textContent = me;
-    $("who").append(b, approved ? "（" + ROLE_LABEL[role] + "）でログイン中" : " でログイン中（承認待ち）");
+    $("who").append(el("b", { text: me }), myRole === "admin" ? "（全体の管理者）でログイン中" : " でログイン中");
   } else {
     $("who").textContent = "ログインしていません";
   }
-  $("toggle").disabled = !approved;
-  $("toggleHint").textContent = approved ? "押すとみんなの電気が切り替わります"
-    : me ? "承認されると切り替えられます" : "ログインすると切り替えられます";
-  if (me) await refreshKeys();
-  if (approved) await refreshMembers(quiet);
 }
 
-async function apiQuiet(path, body) {
-  const h = { "Content-Type": "application/json" };
-  if (token) h.Authorization = "Bearer " + token;
-  const res = await fetch(path, { method: "POST", headers: h, body: JSON.stringify(body || {}) });
-  return res.json();
-}
-
-async function refreshMembers(quiet) {
-  const r = quiet ? await apiQuiet("/api/account/v0/list", {}) : await api("/api/account/v0/list", {}, true);
-  const box = $("members");
-  if (r.status !== "success") return;
-  const key = role + JSON.stringify(r.account_list);
+// 内容が変わったときだけ描き直す（定期確認でボタンがちらつかないように）
+function render(box, key, build) {
   if (box.dataset.key === key) return;
   box.dataset.key = key;
   box.innerHTML = "";
-  // 承認待ちを上に
-  const list = r.account_list.slice().sort((a, b) =>
-    (a.status === "pending" ? 0 : 1) - (b.status === "pending" ? 0 : 1));
-  for (const a of list) {
-    const row = document.createElement("div");
-    row.className = "member";
-    const left = document.createElement("div");
-    const name = document.createElement("b");
-    name.textContent = a.user;
-    left.append(name);
-    if (a.user === me) {
-      const s = document.createElement("span");
-      s.className = "badge me";
-      s.textContent = "自分";
-      left.append(s);
+  build();
+}
+
+async function refreshAll(quiet) {
+  await refreshMe(quiet);
+  const jobs = [refreshTenant(quiet)];
+  if (me) jobs.push(refreshTenants(quiet), refreshKeys(quiet));
+  if (myRole === "admin") jobs.push(refreshAccounts(quiet));
+  await Promise.all(jobs);
+}
+
+// ---------- URL で開いたテナント ----------
+let current = null;     // /api/tenant/v0/get の tenant
+
+async function refreshTenant(quiet) {
+  $("tenantCard").classList.toggle("hidden", !TENANT);
+  if (!TENANT) {
+    $("tenantMembersCard").classList.add("hidden");
+    return;
+  }
+  const r = await api("/api/tenant/v0/get", { tenant: TENANT }, quiet);
+  const body = $("tenantBody");
+  if (r.status !== "success") {
+    current = null;
+    $("tenantName").textContent = "テナント";
+    render(body, "error:" + r.message, () => body.append(el("p", { class: "msg err",
+      text: r.message === "unknown tenant" ? "このテナントは見つかりません（削除されたか、URL が違います）"
+        : "読み込めません: " + r.message })));
+    $("tenantMembersCard").classList.add("hidden");
+    return;
+  }
+  current = r.tenant;
+  const t = current;
+  $("tenantName").textContent = t.name;
+  render(body, JSON.stringify([me, t]), () => {
+    if (!me) {
+      body.append(el("p", { class: "note", text: "ログイン（はじめての人は新規登録）すると、このテナントに参加申請できます。" }));
+      return;
     }
-    const badge = document.createElement("span");
-    badge.className = "badge" + (a.status === "pending" ? " pending" : a.role === "admin" ? " admin" : "");
-    badge.textContent = a.status === "pending" ? "承認待ち" : ROLE_LABEL[a.role] || a.role;
-    left.append(badge);
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = "登録 " + utcToLocal(a.created_at) + " ・ パスキー " + a.passkey_count + " 個" +
-      (a.approved_by ? " ・ " + a.approved_by + " が承認" : "");
-    left.append(meta);
-    const btns = document.createElement("div");
-    btns.className = "row";
-    btns.style.marginTop = "0";
-    // 許可と削除は管理者だけ
-    if (role === "admin" && a.status === "pending") {
-      for (const [r2, label, cls] of [["member", "一般として許可", "primary"], ["admin", "管理者として許可", ""]]) {
-        const ok = document.createElement("button");
-        if (cls) ok.className = cls;
-        ok.textContent = label;
-        ok.dataset.role = r2;
-        ok.onclick = () => approveAccount(a.user, r2);
-        btns.append(ok);
+    if (!t.my_status) {
+      body.append(
+        el("p", { class: "note", text: "このテナントのメンバーではありません。参加申請すると、テナントの管理者が承認します。" +
+          "（管理者がまだいないテナントなら、申請した人がそのまま管理者になります）" }),
+        el("div", { class: "row" }, el("button", { class: "primary", id: "btnJoin", text: "このテナントに参加申請", onclick: joinTenant })));
+      return;
+    }
+    if (t.my_status === "pending") {
+      $("tenantCard").classList.add("pending");
+      body.append(
+        el("p", { text: "承認待ちです。テナントの管理者が承認すると、このページを開いたままで電気を使えるようになります。" }),
+        el("div", { class: "row" }, el("button", { text: "申請を取り下げる", onclick: leaveTenant })));
+      return;
+    }
+    $("tenantCard").classList.remove("pending");
+    const toggle = el("button", { class: "toggle" + (t.on ? " on" : ""), id: "toggle", "aria-label": "スイッチ",
+      "aria-pressed": t.on ? "true" : "false", onclick: toggleLight });
+    body.append(
+      el("div", { class: "light" },
+        el("div", { class: "bulb" + (t.on ? " on" : ""), id: "bulb", "aria-hidden": "true" }),
+        el("div", {},
+          el("div", { class: "state", id: "state", text: t.on ? "ついています" : "消えています" }),
+          el("div", { class: "note", id: "lastBy", text: t.updated_by
+            ? "最後に切り替えた人: " + t.updated_by + "（" + utcToLocal(t.updated_at) + "）" : "まだ誰も触っていません" }),
+          el("div", { class: "row" }, toggle,
+            el("span", { class: "note", text: "あなたはこのテナントの" + ROLE_LABEL[t.my_role] + " ・ メンバー " + t.member_count + " 人" })))),
+      el("div", { class: "row" }, el("button", { text: "このテナントを抜ける", onclick: leaveTenant })));
+  });
+  $("tenantCard").classList.toggle("pending", !!me && t.my_status === "pending");
+  const isMember = t.my_status === "approved";
+  $("tenantMembersCard").classList.toggle("hidden", !isMember);
+  if (isMember) await refreshTenantMembers(quiet);
+}
+
+async function refreshTenantMembers(quiet) {
+  const r = await api("/api/tenant/v0/members", { tenant: TENANT }, quiet);
+  const box = $("tenantMembers");
+  if (r.status !== "success") return;
+  const isAdmin = r.me.role === "admin";
+  render(box, JSON.stringify([isAdmin, r.member_list]), () => {
+    // 承認待ちを上に
+    const list = r.member_list.slice().sort((a, b) =>
+      (a.status === "pending" ? 0 : 1) - (b.status === "pending" ? 0 : 1));
+    for (const m of list) {
+      const left = el("div", {}, el("b", { text: m.user }),
+        m.user === me ? badge("自分", "me") : null,
+        m.status === "pending" ? badge("承認待ち", "pending") : badge(ROLE_LABEL[m.role], m.role === "admin" ? "admin" : ""),
+        el("div", { class: "meta", text: "申請 " + utcToLocal(m.created_at) + (m.approved_by && m.approved_by !== m.user
+          ? " ・ " + m.approved_by + " が承認" : "") }));
+      const btns = el("div", { class: "row" });
+      if (isAdmin && m.status === "pending") {
+        btns.append(
+          el("button", { class: "primary", "data-role": "member", text: "一般として承認", onclick: () => approveMember(m.user, "member") }),
+          el("button", { "data-role": "admin", text: "管理者として承認", onclick: () => approveMember(m.user, "admin") }));
       }
+      if (isAdmin && m.user !== me) {
+        btns.append(el("button", { class: "danger", text: m.status === "pending" ? "却下" : "外す",
+          onclick: () => removeMember(m) }));
+      }
+      box.append(el("div", { class: "item" }, left, btns));
     }
-    if (role === "admin" && a.user !== me) {
-      const del = document.createElement("button");
-      del.className = "danger";
-      del.textContent = a.status === "pending" ? "却下" : "削除";
-      del.onclick = () => deleteAccount(a);
-      btns.append(del);
+  });
+}
+
+async function joinTenant() {
+  const r = await api("/api/tenant/v0/join", { tenant: TENANT });
+  if (r.status !== "success") return showMsg("msgTenant", "申請できません: " + r.message, "err");
+  showMsg("msgTenant", r.member.status === "approved"
+    ? "参加しました（最初の 1 人なので、このテナントの管理者です）" : "参加申請しました。承認を待っています", "ok");
+  await refreshAll();
+}
+
+async function leaveTenant() {
+  const pending = current && current.my_status === "pending";
+  if (!confirm(pending ? "参加申請を取り下げますか？" : "このテナントを抜けますか？")) return;
+  const r = await api("/api/tenant/v0/leave", { tenant: TENANT });
+  if (r.message === "last admin cannot leave") {
+    return showMsg("msgTenant", "このテナントの管理者があなた 1 人なので抜けられません。先に誰かを管理者として承認してください", "err");
+  }
+  if (r.status !== "success") return showMsg("msgTenant", "抜けられません: " + r.message, "err");
+  showMsg("msgTenant", pending ? "申請を取り下げました" : "テナントを抜けました", "ok");
+  await refreshAll();
+}
+
+async function toggleLight() {
+  if (!current) return;
+  $("toggle").disabled = true;
+  const r = await api("/api/tenant/v0/switch_set", { tenant: TENANT, on: !current.on });
+  if (r.status !== "success") showMsg("msgTenant", "切り替えられません: " + r.message, "err");
+  await refreshAll();
+}
+
+async function approveMember(user, role) {
+  const r = await api("/api/tenant/v0/approve", { tenant: TENANT, user, role });
+  if (r.status !== "success") return showMsg("msgMembers", "承認できません: " + r.message, "err");
+  showMsg("msgMembers", user + " を" + ROLE_LABEL[role] + "として承認しました", "ok");
+  await refreshAll();
+}
+
+async function removeMember(m) {
+  const what = m.status === "pending" ? "の申請を却下" : "をこのテナントから外";
+  if (!confirm("「" + m.user + "」" + what + "しますか？")) return;
+  const r = await api("/api/tenant/v0/remove", { tenant: TENANT, user: m.user });
+  if (r.status !== "success") return showMsg("msgMembers", "できません: " + r.message, "err");
+  showMsg("msgMembers", m.user + (m.status === "pending" ? " の申請を却下しました" : " を外しました"), "ok");
+  await refreshAll();
+}
+
+// ---------- テナントの一覧（全体の管理者は追加・削除も） ----------
+async function refreshTenants(quiet) {
+  const r = await api("/api/tenant/v0/list", {}, quiet);
+  const box = $("tenants");
+  if (r.status !== "success") return;
+  render(box, JSON.stringify([myRole, r.tenant_list]), () => {
+    if (r.tenant_list.length === 0) {
+      box.append(el("p", { class: "note", text: myRole === "admin" ? "テナントはまだありません。"
+        : "まだどのテナントにも参加していません。テナントの管理者から URL をもらって開いてください。" }));
     }
-    row.append(left, btns);
-    box.append(row);
+    for (const t of r.tenant_list) {
+      const left = el("div", {},
+        t.my_status === "approved" ? el("span", { class: "dot" + (t.on ? " on" : "") }) : null,
+        el("a", { href: "?tenant=" + t.tenant, text: t.name }),
+        t.my_status === "pending" ? badge("承認待ち", "pending")
+          : t.my_role ? badge(ROLE_LABEL[t.my_role], t.my_role === "admin" ? "admin" : "") : null,
+        el("div", { class: "meta", text: "メンバー " + t.member_count + " 人" +
+          (myRole === "admin" ? " ・ " + tenantUrl(t.tenant) : "") }));
+      const btns = el("div", { class: "row" });
+      if (myRole === "admin") {
+        btns.append(
+          el("button", { text: "URL をコピー", onclick: () => copyUrl(t) }),
+          el("button", { class: "danger", text: "削除", onclick: () => deleteTenant(t) }));
+      }
+      box.append(el("div", { class: "item" }, left, btns));
+    }
+  });
+}
+
+async function copyUrl(t) {
+  try {
+    await navigator.clipboard.writeText(tenantUrl(t.tenant));
+    showMsg("msgTenants", t.name + " の URL をコピーしました", "ok");
+  } catch (e) {
+    showMsg("msgTenants", tenantUrl(t.tenant), "");
   }
 }
 
-async function approveAccount(user, r2) {
-  const r = await api("/api/account/v0/approve", { user, role: r2 }, true);
-  if (r.status !== "success") return showMsg("msgMembers", "許可できません: " + r.message, "err");
-  showMsg("msgMembers", user + " を" + ROLE_LABEL[r2] + "として許可しました", "ok");
-  await refreshMembers();
+async function addTenant() {
+  const name = $("tenantNew").value.trim();
+  const r = await api("/api/tenant/v0/add", { name });
+  if (r.status !== "success") return showMsg("msgTenants", "追加できません: " + r.message, "err");
+  $("tenantNew").value = "";
+  showMsg("msgTenants", r.tenant.name + " を追加しました。URL: " + tenantUrl(r.tenant.tenant), "ok");
+  await refreshAll();
+}
+
+async function deleteTenant(t) {
+  if (!confirm("テナント「" + t.name + "」を削除しますか？（メンバーと電気の状態も消えます）")) return;
+  const r = await api("/api/tenant/v0/delete", { tenant: t.tenant });
+  if (r.status !== "success") return showMsg("msgTenants", "削除できません: " + r.message, "err");
+  showMsg("msgTenants", t.name + " を削除しました", "ok");
+  await refreshAll();
+}
+
+// ---------- アカウント（全体の管理者） ----------
+async function refreshAccounts(quiet) {
+  const r = await api("/api/account/v0/list", {}, quiet);
+  const box = $("accounts");
+  if (r.status !== "success") return;
+  render(box, JSON.stringify(r.account_list), () => {
+    for (const a of r.account_list) {
+      const left = el("div", {}, el("b", { text: a.user }),
+        a.user === me ? badge("自分", "me") : null,
+        a.role === "admin" ? badge("全体の管理者", "admin") : null,
+        el("div", { class: "meta", text: "登録 " + utcToLocal(a.created_at) + " ・ パスキー " + a.passkey_count + " 個" }));
+      const btns = el("div", { class: "row" },
+        el("button", { text: a.role === "admin" ? "一般にする" : "管理者にする",
+          onclick: () => setRole(a.user, a.role === "admin" ? "member" : "admin") }));
+      if (a.user !== me) {
+        btns.append(el("button", { class: "danger", text: "削除", onclick: () => deleteAccount(a) }));
+      }
+      box.append(el("div", { class: "item" }, left, btns));
+    }
+  });
+}
+
+async function setRole(user, role) {
+  const r = await api("/api/account/v0/set_role", { user, role });
+  if (r.message === "last admin cannot be demoted") {
+    return showMsg("msgAccounts", "全体の管理者が 1 人もいなくなるので、一般にはできません", "err");
+  }
+  if (r.status !== "success") return showMsg("msgAccounts", "変更できません: " + r.message, "err");
+  showMsg("msgAccounts", user + " を" + (role === "admin" ? "全体の管理者" : "一般") + "にしました", "ok");
+  await refreshAll();
 }
 
 async function deleteAccount(a) {
-  const what = a.status === "pending" ? "の登録を却下" : "のアカウントを削除";
-  if (!confirm("「" + a.user + "」" + what + "しますか？（パスキーとログイン中のセッションも消えます）")) return;
-  const r = await api("/api/account/v0/delete", { user: a.user }, true);
-  if (r.status !== "success") return showMsg("msgMembers", "削除できません: " + r.message, "err");
-  showMsg("msgMembers", a.user + " " + (a.status === "pending" ? "を却下しました" : "を削除しました"), "ok");
-  await refreshMembers();
+  if (!confirm("「" + a.user + "」のアカウントを削除しますか？（パスキー、ログイン中のセッション、テナントの所属も消えます）")) return;
+  const r = await api("/api/account/v0/delete", { user: a.user });
+  if (r.status !== "success") return showMsg("msgAccounts", "削除できません: " + r.message, "err");
+  showMsg("msgAccounts", a.user + " を削除しました", "ok");
+  await refreshAll();
 }
 
+// ---------- 自分のパスキー ----------
 const LABELS = {
   credential_id: "credential ID",
   public_key: "公開鍵 (COSE)",
@@ -495,53 +690,38 @@ const LABELS = {
   created_at: "登録した",
 };
 
-async function refreshKeys() {
-  const r = await api("/api/passkey/v0/list", {}, true);
+async function refreshKeys(quiet) {
+  const r = await api("/api/passkey/v0/list", {}, quiet);
   const box = $("keys");
-  box.innerHTML = "";
   if (r.status !== "success") return;
-  for (const p of r.passkey_list) {
-    const div = document.createElement("div");
-    div.className = "key";
-    const head = document.createElement("div");
-    head.className = "key-head";
-    const name = document.createElement("b");
-    name.textContent = p.name;
-    const del = document.createElement("button");
-    del.className = "danger";
-    del.textContent = "削除";
-    del.onclick = () => deleteKey(p, r.passkey_list.length);
-    head.append(name, del);
-    const table = document.createElement("table");
-    for (const k of Object.keys(LABELS)) {
-      let v = p[k];
-      if (k === "alg") v = v === -7 ? "-7 (ES256)" : v === -257 ? "-257 (RS256)" : v;
-      if (k === "transports") v = v.join(", ");
-      if (k === "backup_eligible" || k === "backed_up") v = v ? "はい" : "いいえ";
-      if (k === "last_used_at" || k === "created_at") v = utcToLocal(v);
-      const tr = document.createElement("tr");
-      const th = document.createElement("th");
-      th.textContent = LABELS[k];
-      const td = document.createElement("td");
-      const code = document.createElement("code");
-      code.textContent = v == null || v === "" ? "—" : String(v);
-      td.append(code);
-      tr.append(th, td);
-      table.append(tr);
+  render(box, JSON.stringify(r.passkey_list), () => {
+    for (const p of r.passkey_list) {
+      const table = el("table");
+      for (const k of Object.keys(LABELS)) {
+        let v = p[k];
+        if (k === "alg") v = v === -7 ? "-7 (ES256)" : v === -257 ? "-257 (RS256)" : v;
+        if (k === "transports") v = v.join(", ");
+        if (k === "backup_eligible" || k === "backed_up") v = v ? "はい" : "いいえ";
+        if (k === "last_used_at" || k === "created_at") v = utcToLocal(v);
+        table.append(el("tr", {}, el("th", { text: LABELS[k] }),
+          el("td", {}, el("code", { text: v == null || v === "" ? "—" : String(v) }))));
+      }
+      box.append(el("div", { class: "key" },
+        el("div", { class: "key-head" }, el("b", { text: p.name }),
+          el("button", { class: "danger", text: "削除", onclick: () => deleteKey(p, r.passkey_list.length) })),
+        table));
     }
-    div.append(head, table);
-    box.append(div);
-  }
+  });
 }
 
 async function deleteKey(p, count) {
   const warn = count <= 1
-    ? "最後のパスキーです。消すとこのアカウントには二度とログインできません。消しますか？"
+    ? "最後のパスキーです。消すとこのアカウントは削除されます（テナントの所属も消えます）。消しますか？"
     : "「" + p.name + "」を消しますか？（端末側のパスキーは残るので、端末の設定からも消してください）";
   if (!confirm(warn)) return;
-  const r = await api("/api/passkey/v0/delete", { credential_id: p.credential_id }, true);
+  const r = await api("/api/passkey/v0/delete", { credential_id: p.credential_id });
   if (r.message === "last admin cannot leave") {
-    return showMsg("msgIn", "管理者があなた 1 人なので退会できません。先に誰かを管理者として許可してください", "err");
+    return showMsg("msgIn", "全体の管理者があなた 1 人なので退会できません。先に誰かを全体の管理者にしてください", "err");
   }
   if (r.status !== "success") return showMsg("msgIn", "削除できません: " + r.message, "err");
   // 端末側にも「このパスキーはもう無い」と伝える（対応ブラウザのみ）
@@ -552,42 +732,9 @@ async function deleteKey(p, count) {
   } catch (e) {}
   // 最後の 1 本ならサーバがアカウントごと消している（トークンも無効）
   if (r.account_deleted) setToken("");
-  await refreshMe();
+  await refreshAll();
   showMsg(r.account_deleted ? "msgOut" : "msgIn",
     r.account_deleted ? "アカウントを削除しました" : "削除しました", "ok");
-}
-
-async function logout() {
-  await api("/api/passkey/v0/logout", {}, true);
-  setToken("");
-  await refreshMe();
-}
-
-// ---------- スイッチ ----------
-let switchOn = false;
-function renderSwitch(s) {
-  if (s.status !== "success") return;
-  switchOn = s.on;
-  $("bulb").classList.toggle("on", s.on);
-  $("toggle").classList.toggle("on", s.on);
-  $("toggle").setAttribute("aria-pressed", s.on ? "true" : "false");
-  $("state").textContent = s.on ? "ついています" : "消えています";
-  $("lastBy").textContent = s.updated_by
-    ? "最後に切り替えた人: " + s.updated_by + "（" + utcToLocal(s.updated_at) + "）"
-    : "まだ誰も触っていません";
-}
-
-async function pollSwitch() {
-  try { renderSwitch(await api("/api/switch/v0/get", {})); } catch (e) {}
-}
-
-async function toggleSwitch() {
-  $("toggle").disabled = true;
-  const r = await api("/api/switch/v0/set", { on: !switchOn }, true);
-  if (r.status === "success") renderSwitch(r);
-  else if (r.message === "not logged in") { setToken(""); await refreshMe(); }
-  else if (r.message === "not approved") await refreshMe();
-  $("toggle").disabled = !approved;
 }
 
 // ---------- 起動 ----------
@@ -595,8 +742,9 @@ $("btnSignup").onclick = () => register("signup");
 $("btnLogin").onclick = login;
 $("btnAdd").onclick = () => register("add");
 $("btnLogout").onclick = logout;
-$("toggle").onclick = toggleSwitch;
+$("btnAddTenant").onclick = addTenant;
 $("user").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+$("tenantNew").addEventListener("keydown", (e) => { if (e.key === "Enter") addTenant(); });
 
 if (!supported()) {
   showMsg("msgOut", window.isSecureContext
@@ -604,11 +752,9 @@ if (!supported()) {
     : "パスキーは https か localhost でしか使えません（いまの URL: " + location.origin + "）", "err");
 }
 
-refreshMe();
-pollSwitch();
-setInterval(pollSwitch, 2000);
-// 承認された・消された・メンバーが増えた、を拾う
-setInterval(() => { if (token) refreshMe(true).catch(() => {}); }, 4000);
+refreshAll();
+// 承認された・電気が切り替わった・メンバーが増えた、を拾う
+setInterval(() => refreshAll(true).catch(() => {}), 3000);
 </script>
 </body>
 </html>

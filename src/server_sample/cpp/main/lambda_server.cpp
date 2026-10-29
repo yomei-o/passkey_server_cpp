@@ -1,6 +1,6 @@
 ﻿
 #define ENABLE_API_PASSKEY 1
-#define ENABLE_API_SWITCH 1
+#define ENABLE_API_TENANT 1
 
 
 #include "lambda_server.h"
@@ -9,8 +9,8 @@
 #include "testsv_api_passkey.h"
 #endif
 
-#ifdef ENABLE_API_SWITCH
-#include "testsv_api_switch.h"
+#ifdef ENABLE_API_TENANT
+#include "testsv_api_tenant.h"
 #endif
 
 
@@ -40,8 +40,8 @@ int main()
 	passkey::init_api_passkey(svr);
 #endif
 
-#ifdef ENABLE_API_SWITCH
-	switch_api::init_api_switch(svr);
+#ifdef ENABLE_API_TENANT
+	tenant_api::init_api_tenant(svr);
 #endif
 
 	fprintf(stderr,"http server started port=%d\n",port);

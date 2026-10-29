@@ -14,12 +14,12 @@ sys.path.insert(0, os.path.join(_bootstrap.HERE, ".."))
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import testsv_api_passkey as P
-import testsv_api_switch as S
+import testsv_api_tenant as TN
 import passkey_common
 
 app = FastAPI()
 app.include_router(P.router, prefix="/api")
-app.include_router(S.router, prefix="/api")
+app.include_router(TN.router, prefix="/api")
 client = TestClient(app)
 
 

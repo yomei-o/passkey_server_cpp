@@ -157,7 +157,8 @@ def make_get(key, options, origin, rp_id=None, typ="webauthn.get", flags=UP | UV
 
 def reset_db(db_path):
     c = sqlite3.connect(db_path)
-    for t in ("session", "passkey", "passkey_challenge", "switch_state", "account"):
+    for t in ("session", "passkey", "passkey_challenge", "switch_state", "account",
+              "tenant", "tenant_member"):
         c.execute("delete from " + t)
     c.commit()
     c.close()
@@ -219,7 +220,7 @@ def run(ck, post, db_path, origin):
     ck(len(A) == 32, "sign up returns an access_token")
     me = post("/api/passkey/v0/me", {}, A)
     ck(me.get("status") == "success" and me.get("user") == "alice", "me -> alice")
-    ck(r1.get("approved") is True and me.get("approved") is True, "the first user is approved at once")
+    ck(r1.get("role") == "admin" and me.get("role") == "admin", "the first user is the global admin")
     row = r1.get("passkey", {})
     ck(row.get("credential_id") == k1.id, "stored credential_id")
     ck(row.get("user") == "alice" and row.get("name") == "my phone", "stored user / name")
@@ -238,8 +239,8 @@ def run(ck, post, db_path, origin):
     kc = SoftKey(-7)
     rc = post("/api/passkey/v0/register_verify", make_create(kc, o1, origin))
     C = rc.get("access_token", "")
-    ck(rc.get("status") == "success" and rc.get("approved") is False and len(C) == 32,
-       "carol signs up as the 2nd user -> pending, but logged in")
+    ck(rc.get("status") == "success" and rc.get("role") == "member" and len(C) == 32,
+       "carol signs up as the 2nd user -> a plain member, logged in")
     check_fail(post("/api/passkey/v0/register_verify", make_create(SoftKey(-7), o2, origin)),
                "user already exists")
 
@@ -286,7 +287,7 @@ def run(ck, post, db_path, origin):
     kb = SoftKey(-7)
     rb = signup("bob", kb)
     B = rb.get("access_token", "")
-    ck(rb.get("status") == "success" and rb.get("approved") is False, "bob signs up -> pending")
+    ck(rb.get("status") == "success" and rb.get("role") == "member", "bob signs up -> member")
     reg_fail("challenge user mismatch", opts=reg_options(token=A), token=B)
     reg_fail("challenge user mismatch", opts=reg_options("dave"), token=A)
 
@@ -382,50 +383,41 @@ def run(ck, post, db_path, origin):
     check_fail(post("/api/passkey/v0/register_verify", make_create(k, reg_options("newuser"), origin)),
                "invalid public key")
 
-    print("\n--- accounts (roles, approve, delete) ---")
-    me = post("/api/passkey/v0/me", {}, A)
-    ck(me.get("role") == "admin", "the first user is an admin")
-    me = post("/api/passkey/v0/me", {}, C)
-    ck(me.get("approved") is False and me.get("role") is None, "carol is pending, no role yet")
-    check_fail(post("/api/account/v0/list", {}, C), "not approved")
-    check_fail(post("/api/account/v0/approve", {"user": "carol", "role": "admin"}, C), "not approved")
-    check_fail(post("/api/account/v0/delete", {"user": "alice"}, C), "not approved")
+    print("\n--- accounts (global roles) ---")
+    # ここまでで: alice は全体の管理者（パスキー k1）、carol / bob は一般
+    ck(post("/api/passkey/v0/me", {}, C).get("role") == "member", "me says carol is a member")
+    check_fail(post("/api/account/v0/list", {}, C), "admin only")
     check_fail(post("/api/account/v0/list", {}), "not logged in")
     r = post("/api/account/v0/list", {}, A)
     accts = {a["user"]: a for a in r.get("account_list", [])}
     ck(r.get("status") == "success" and sorted(accts) == ["alice", "bob", "carol"],
-       "alice lists alice / bob / carol")
-    ck(accts.get("alice", {}).get("status") == "approved" and accts["alice"].get("role") == "admin"
-       and accts["alice"].get("approved_by") == "alice", "alice: approved admin (by herself, as the first user)")
-    ck(accts.get("carol", {}).get("status") == "pending" and accts["carol"].get("role") is None
-       and accts["carol"].get("approved_by") is None, "carol: pending, no role")
+       "the admin lists alice / bob / carol")
+    ck(accts.get("alice", {}).get("role") == "admin" and accts.get("carol", {}).get("role") == "member"
+       and all(a.get("status") == "approved" for a in accts.values()), "roles in the list, nobody pending")
     ck(accts.get("alice", {}).get("passkey_count") == 1 and accts.get("bob", {}).get("passkey_count") == 1,
        "passkey_count")
-    check_fail(post("/api/account/v0/approve", {}, A), "invalid request")
-    check_fail(post("/api/account/v0/approve", {"user": "carol"}, A), "invalid role")
-    check_fail(post("/api/account/v0/approve", {"user": "carol", "role": "boss"}, A), "invalid role")
-    check_fail(post("/api/account/v0/approve", {"user": "nosuch", "role": "member"}, A), "unknown account")
-    check_fail(post("/api/account/v0/approve", {"user": "alice", "role": "member"}, A), "already approved")
-    r = post("/api/account/v0/approve", {"user": "carol", "role": "member"}, A)
-    acc = r.get("account", {})
-    ck(r.get("status") == "success" and acc.get("status") == "approved" and acc.get("role") == "member"
-       and acc.get("approved_by") == "alice" and len(acc.get("approved_at") or "") == 19,
-       "alice approves carol as a member")
-    me = post("/api/passkey/v0/me", {}, C)
-    ck(me.get("approved") is True and me.get("role") == "member", "carol is an approved member now")
-    ck(post("/api/account/v0/list", {}, C).get("status") == "success", "a member can list accounts")
-    check_fail(post("/api/account/v0/approve", {"user": "bob", "role": "member"}, C), "admin only")
-    check_fail(post("/api/account/v0/delete", {"user": "bob"}, C), "admin only")
 
+    check_fail(post("/api/account/v0/set_role", {"user": "bob", "role": "admin"}, C), "admin only")
+    check_fail(post("/api/account/v0/set_role", {}, A), "invalid request")
+    check_fail(post("/api/account/v0/set_role", {"user": "carol"}, A), "invalid role")
+    check_fail(post("/api/account/v0/set_role", {"user": "nosuch", "role": "admin"}, A), "unknown account")
+    check_fail(post("/api/account/v0/set_role", {"user": "alice", "role": "member"}, A),
+               "last admin cannot be demoted")
+    r = post("/api/account/v0/set_role", {"user": "carol", "role": "admin"}, A)
+    ck(r.get("account", {}).get("role") == "admin", "alice makes carol an admin")
+    ck(post("/api/passkey/v0/me", {}, C).get("role") == "admin", "carol is an admin now")
+    r = post("/api/account/v0/set_role", {"user": "carol", "role": "member"}, C)
+    ck(r.get("account", {}).get("role") == "member", "with 2 admins, carol can step down")
+
+    check_fail(post("/api/account/v0/delete", {"user": "bob"}, C), "admin only")
     check_fail(post("/api/account/v0/delete", {"user": "alice"}, A), "cannot delete yourself")
     check_fail(post("/api/account/v0/delete", {"user": "nosuch"}, A), "unknown account")
     check_fail(post("/api/account/v0/delete", {}, A), "invalid request")
     kd = SoftKey(-7)
     rd = signup("dave", kd)
     D = rd.get("access_token", "")
-    ck(rd.get("approved") is False and rd.get("role") is None, "dave signs up -> pending")
-    r = post("/api/account/v0/delete", {"user": "dave"}, A)
-    ck(r.get("status") == "success", "the admin deletes (rejects) pending dave")
+    ck(rd.get("role") == "member", "dave signs up -> member")
+    ck(post("/api/account/v0/delete", {"user": "dave"}, A).get("status") == "success", "the admin deletes dave")
     check_fail(post("/api/passkey/v0/me", {}, D), "not logged in")
     login_fail("unknown credential", key=kd)
     ck(not sql(db_path, "select 1 from passkey where user='dave'"), "dave's passkeys are gone")
@@ -434,48 +426,142 @@ def run(ck, post, db_path, origin):
 
     print("\n--- leaving: deleting your last passkey ---")
     ke = SoftKey(-7)
-    re_ = signup("erin", ke)
-    E = re_.get("access_token", "")
+    E = signup("erin", ke).get("access_token", "")
     r = post("/api/passkey/v0/delete", {"credential_id": ke.id}, E)
     ck(r.get("status") == "success" and r.get("account_deleted") is True, "erin deletes her only key")
     check_fail(post("/api/passkey/v0/me", {}, E), "not logged in")
     ck(not sql(db_path, "select 1 from account where user='erin'"), "erin's account is gone")
-
     check_fail(post("/api/passkey/v0/delete", {"credential_id": k1.id}, A), "last admin cannot leave")
-    ck(sql(db_path, "select 1 from passkey where credential_id=?", (k1.id,)) == [(1,)],
-       "the last admin's key is kept")
     kf = SoftKey(-7)
     F = signup("frank", kf).get("access_token", "")
-    r = post("/api/account/v0/approve", {"user": "frank", "role": "admin"}, A)
-    ck(r.get("account", {}).get("role") == "admin", "alice approves frank as an admin")
+    ck(post("/api/account/v0/set_role", {"user": "frank", "role": "admin"}, A).get("status") == "success",
+       "alice makes frank an admin")
     r = post("/api/passkey/v0/delete", {"credential_id": k1.id}, A)
-    r2 = post("/api/passkey/v0/list", {}, A)
-    ck(r.get("account_deleted") is True and r2.get("message") == "not logged in",
-       "with another admin, alice can delete her last key and leave")
+    ck(r.get("account_deleted") is True and post("/api/passkey/v0/me", {}, A).get("message") == "not logged in",
+       "with another admin, alice can leave")
     A = signup("alice", SoftKey(-7)).get("access_token", "")
-    me = post("/api/passkey/v0/me", {}, A)
-    ck(me.get("approved") is False and me.get("role") is None,
-       "alice signs up again but is pending (approved users still exist)")
+    ck(post("/api/passkey/v0/me", {}, A).get("role") == "member",
+       "alice signs up again as a member (an admin exists)")
 
-    print("\n--- shared switch ---")
-    r = post("/api/switch/v0/get", {})
-    ck(r == {"status": "success", "on": False, "updated_by": None, "updated_at": None},
-       "switch starts off, nobody touched it")
-    check_fail(post("/api/switch/v0/set", {"on": True}), "not logged in")
-    check_fail(post("/api/switch/v0/set", {"on": True}, "nosuchtoken"), "not logged in")
-    check_fail(post("/api/switch/v0/set", {"on": True}, A), "not approved")
-    check_fail(post("/api/switch/v0/set", {"on": 1}, C), "invalid request")
-    check_fail(post("/api/switch/v0/set", {}, C), "invalid request")
-    r = post("/api/switch/v0/set", {"on": True}, C)
-    ck(r.get("status") == "success" and r.get("on") is True and r.get("updated_by") == "carol",
-       "carol turns it on")
-    ck(len(r.get("updated_at") or "") == 19, "updated_at is YYYY-MM-DD HH:MM:SS")
-    r = post("/api/switch/v0/get", {})
-    ck(r.get("on") is True and r.get("updated_by") == "carol", "everyone sees it on (by carol)")
-    B = post("/api/passkey/v0/login_verify", make_get(kb, lopt(), origin)).get("access_token", "")
-    check_fail(post("/api/switch/v0/set", {"on": False}, B), "not approved")
-    ck(post("/api/account/v0/approve", {"user": "bob", "role": "member"}, F).get("status") == "success",
-       "frank (admin) approves bob")
-    r = post("/api/switch/v0/set", {"on": False}, B)
-    ck(r.get("on") is False and r.get("updated_by") == "bob", "bob turns it off")
-    ck(sql(db_path, "select count(*) from switch_state") == [(1,)], "one row for the switch")
+    print("\n--- tenants: add / get / list ---")
+    # frank は全体の管理者、alice / bob / carol は一般
+    check_fail(post("/api/tenant/v0/list", {}), "not logged in")
+    r = post("/api/tenant/v0/list", {}, C)
+    ck(r.get("status") == "success" and r.get("tenant_list") == [], "no tenants for carol at first")
+    check_fail(post("/api/tenant/v0/add", {"name": "テナントA"}, C), "admin only")
+    r = post("/api/tenant/v0/add", {"name": "テナントA"}, F)
+    tA = r.get("tenant", {}).get("tenant", "")
+    ck(r.get("status") == "success" and len(tA) == 32 and all(c in "0123456789abcdef" for c in tA),
+       "the admin adds テナントA with a 32-hex guid")
+    ck(r["tenant"].get("name") == "テナントA" and r["tenant"].get("created_by") == "frank"
+       and r["tenant"].get("my_status") is None and r["tenant"].get("member_count") == 0,
+       "the creator is not a member of it")
+    check_fail(post("/api/tenant/v0/add", {"name": "テナントA"}, F), "tenant already exists")
+    check_fail(post("/api/tenant/v0/add", {}, F), "invalid tenant name")
+    check_fail(post("/api/tenant/v0/add", {"name": "x" * 65}, F), "invalid tenant name")
+    tB = post("/api/tenant/v0/add", {"name": "テナントB"}, F).get("tenant", {}).get("tenant", "")
+    ck(len(tB) == 32 and tB != tA, "テナントB gets another guid")
+    r = post("/api/tenant/v0/list", {}, F)
+    ck([t["name"] for t in r.get("tenant_list", [])] == ["テナントA", "テナントB"],
+       "the global admin lists all tenants")
+    ck(post("/api/tenant/v0/list", {}, C).get("tenant_list") == [],
+       "others only see tenants they joined (none yet)")
+
+    r = post("/api/tenant/v0/get", {"tenant": tA})
+    t = r.get("tenant", {})
+    ck(r.get("status") == "success" and t.get("name") == "テナントA" and t.get("my_status") is None
+       and t.get("on") is None, "anyone with the URL sees the name, not the light")
+    check_fail(post("/api/tenant/v0/get", {"tenant": tA}, "nosuchtoken"), "not logged in")
+    check_fail(post("/api/tenant/v0/get", {"tenant": "0" * 32}), "unknown tenant")
+    check_fail(post("/api/tenant/v0/get", {}), "invalid request")
+
+    print("\n--- tenants: join / approve ---")
+    check_fail(post("/api/tenant/v0/join", {"tenant": tA}), "not logged in")
+    check_fail(post("/api/tenant/v0/join", {"tenant": "0" * 32}, C), "unknown tenant")
+    r = post("/api/tenant/v0/join", {"tenant": tA}, C)
+    m = r.get("member", {})
+    ck(r.get("status") == "success" and m.get("status") == "approved" and m.get("role") == "admin",
+       "carol joins テナントA first -> its admin at once")
+    check_fail(post("/api/tenant/v0/join", {"tenant": tA}, C), "already requested")
+    ck(post("/api/tenant/v0/join", {"tenant": tA}, B).get("member", {}).get("status") == "pending",
+       "bob joins -> pending")
+    ck(post("/api/tenant/v0/join", {"tenant": tA}, A).get("member", {}).get("status") == "pending",
+       "alice joins -> pending")
+    r = post("/api/tenant/v0/list", {}, C)
+    ck(len(r.get("tenant_list", [])) == 1 and r["tenant_list"][0].get("my_role") == "admin"
+       and r["tenant_list"][0].get("on") is False, "carol lists テナントA as its admin, light off")
+    r = post("/api/tenant/v0/list", {}, B)
+    ck(r.get("tenant_list", [{}])[0].get("my_status") == "pending" and r["tenant_list"][0].get("on") is None,
+       "bob lists テナントA as pending, light hidden")
+
+    check_fail(post("/api/tenant/v0/members", {"tenant": tA}, B), "tenant member only")
+    r = post("/api/tenant/v0/members", {"tenant": tA}, C)
+    ck(r.get("status") == "success" and r.get("total_count") == 3 and r.get("me", {}).get("role") == "admin",
+       "carol lists the 3 members of テナントA")
+    check_fail(post("/api/tenant/v0/switch_set", {"tenant": tA, "on": True}, B), "tenant member only")
+    check_fail(post("/api/tenant/v0/switch_set", {"tenant": tA, "on": True}, F), "tenant member only")
+
+    check_fail(post("/api/tenant/v0/approve", {"tenant": tA, "user": "bob", "role": "member"}, B),
+               "tenant admin only")
+    check_fail(post("/api/tenant/v0/approve", {"tenant": tA, "user": "bob", "role": "member"}, F),
+               "tenant admin only")
+    check_fail(post("/api/tenant/v0/approve", {"tenant": tA}, C), "invalid request")
+    check_fail(post("/api/tenant/v0/approve", {"tenant": tA, "user": "bob"}, C), "invalid role")
+    check_fail(post("/api/tenant/v0/approve", {"tenant": tA, "user": "nosuch", "role": "member"}, C),
+               "unknown member")
+    check_fail(post("/api/tenant/v0/approve", {"tenant": tA, "user": "carol", "role": "member"}, C),
+               "already approved")
+    r = post("/api/tenant/v0/approve", {"tenant": tA, "user": "bob", "role": "member"}, C)
+    ck(r.get("member", {}).get("status") == "approved" and r["member"].get("role") == "member"
+       and r["member"].get("approved_by") == "carol", "carol approves bob as a member")
+    r = post("/api/tenant/v0/approve", {"tenant": tA, "user": "alice", "role": "admin"}, C)
+    ck(r.get("member", {}).get("role") == "admin", "carol approves alice as an admin")
+
+    print("\n--- tenants: light ---")
+    check_fail(post("/api/tenant/v0/switch_set", {"tenant": tA, "on": 1}, B), "invalid request")
+    r = post("/api/tenant/v0/switch_set", {"tenant": tA, "on": True}, B)
+    ck(r.get("status") == "success" and r.get("tenant", {}).get("on") is True
+       and r["tenant"].get("updated_by") == "bob" and len(r["tenant"].get("updated_at") or "") == 19,
+       "bob (member) turns on テナントA")
+    ck(post("/api/tenant/v0/get", {"tenant": tA}, C).get("tenant", {}).get("on") is True,
+       "carol sees テナントA on")
+    ck(post("/api/tenant/v0/get", {"tenant": tA}).get("tenant", {}).get("on") is None,
+       "without logging in the light stays hidden")
+    ck(post("/api/tenant/v0/join", {"tenant": tB}, C).get("member", {}).get("role") == "admin",
+       "carol joins テナントB first -> its admin")
+    ck(post("/api/tenant/v0/get", {"tenant": tB}, C).get("tenant", {}).get("on") is False,
+       "テナントB has its own light (off)")
+
+    print("\n--- tenants: remove / leave ---")
+    check_fail(post("/api/tenant/v0/remove", {"tenant": tA, "user": "alice"}, B), "tenant admin only")
+    check_fail(post("/api/tenant/v0/remove", {"tenant": tA, "user": "carol"}, C), "cannot delete yourself")
+    check_fail(post("/api/tenant/v0/remove", {"tenant": tA, "user": "nosuch"}, C), "unknown member")
+    ck(post("/api/tenant/v0/remove", {"tenant": tA, "user": "bob"}, C).get("status") == "success",
+       "carol removes bob")
+    check_fail(post("/api/tenant/v0/switch_set", {"tenant": tA, "on": False}, B), "tenant member only")
+    check_fail(post("/api/tenant/v0/leave", {"tenant": tA}, B), "unknown member")
+    ck(post("/api/tenant/v0/leave", {"tenant": tA}, A).get("status") == "success",
+       "alice (one of 2 admins) leaves")
+    ck(post("/api/tenant/v0/join", {"tenant": tA}, B).get("member", {}).get("status") == "pending",
+       "bob asks again -> pending")
+    check_fail(post("/api/tenant/v0/leave", {"tenant": tA}, C), "last admin cannot leave")
+    ck(post("/api/tenant/v0/leave", {"tenant": tA}, B).get("status") == "success", "bob withdraws his request")
+    ck(post("/api/tenant/v0/leave", {"tenant": tA}, C).get("status") == "success",
+       "the last admin can leave when nobody else is left")
+    ck(post("/api/tenant/v0/join", {"tenant": tA}, B).get("member", {}).get("role") == "admin",
+       "the next one to join an empty tenant becomes its admin")
+
+    print("\n--- tenants: delete ---")
+    check_fail(post("/api/tenant/v0/delete", {"tenant": tA}, B), "admin only")
+    check_fail(post("/api/tenant/v0/delete", {"tenant": "0" * 32}, F), "unknown tenant")
+    r = post("/api/tenant/v0/delete", {"tenant": tA}, F)
+    ck(r.get("status") == "success" and r.get("tenant") == tA, "the global admin deletes テナントA")
+    check_fail(post("/api/tenant/v0/get", {"tenant": tA}), "unknown tenant")
+    ck(not sql(db_path, "select 1 from switch_state where name=?", ("tenant/" + tA,)), "its light row is gone")
+    ck(not sql(db_path, "select 1 from tenant_member where user='bob'"), "its members are gone")
+    # アカウントを消すとテナントのメンバーからも外れる。管理者がいなくなったテナントは次の参加者が管理者
+    ck(post("/api/account/v0/delete", {"user": "carol"}, F).get("status") == "success",
+       "frank deletes carol's account")
+    ck(not sql(db_path, "select 1 from tenant_member where user='carol'"), "carol is gone from テナントB")
+    ck(post("/api/tenant/v0/join", {"tenant": tB}, A).get("member", {}).get("role") == "admin",
+       "alice joins テナントB, which has no admin left -> admin")

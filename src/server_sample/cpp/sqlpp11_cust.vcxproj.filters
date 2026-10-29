@@ -24,7 +24,7 @@
     <ClInclude Include="main\lambda_server.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
-    <ClInclude Include="main\testsv_api_switch.h">
+    <ClInclude Include="main\testsv_api_tenant.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="main\database.h">

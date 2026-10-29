@@ -9,7 +9,7 @@ import uvicorn
 from mangum import Mangum
 
 from testsv_api_passkey import router as passkey_router
-from testsv_api_switch import router as switch_router
+from testsv_api_tenant import router as tenant_router
 
 
 app = FastAPI()
@@ -33,7 +33,7 @@ def root():
 
 
 app.include_router(passkey_router, prefix="/api")
-app.include_router(switch_router, prefix="/api")
+app.include_router(tenant_router, prefix="/api")
 
 
 if __name__ == "__main__":

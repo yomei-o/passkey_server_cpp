@@ -5,9 +5,10 @@
 - C++ 版は、ほぼヘッダオンリーのライブラリだけで書いています。`main/lambda_server.cpp` を 1 つコンパイルすれば動きます。署名検証には同梱の mbedtls を使います。
 - Python 版は FastAPI + SQLAlchemy で書いています。署名検証には cryptography を使います。
 - DB は SQLite（既定）と MySQL を切り替えられます。
-- デモとして「**みんなの電気のスイッチ**」が付いています。パスキーでログインした承認済みのメンバーだけがオン・オフを切り替えられ、状態は全員に共有されます。
-- **最初に登録した人は自動で管理者**になります。2 人目からは登録・ログインはできるものの承認待ちになり、管理者が「**管理者**」か「**一般**」として許可するまでスイッチを触れません。
-- 許可と、自分以外のアカウントの削除（承認待ちの人なら却下）は**管理者だけ**ができます。一般メンバーはスイッチとメンバー一覧だけ使えます。最後の管理者は退会できません（誰も許可できなくなるため）。
+- デモとして「**テナントごとの電気のスイッチ**」が付いています。テナントのメンバーだけが、そのテナントの電気をオン・オフできます。
+- **誰でも登録できます。** 最初に登録した人は「**全体の管理者**」になり、テナントの追加・削除、アカウントの削除、ほかの人を全体の管理者にすることができます。
+- テナントは推測できない **GUID の URL**（`/html/index.html?tenant=<GUID>`）で開きます。全体の管理者がテナントを追加し、その URL をテナントの人に渡します。
+- URL を開いた人は「参加申請」します。**そのテナントに管理者がまだいなければ、申請した人がそのままテナントの管理者**になります。それ以降の申請は、テナントの管理者が「管理者」か「一般」として承認します（却下・外すのもテナントの管理者だけ）。
 
 ```
 ブラウザ                                   サーバ
@@ -19,7 +20,7 @@
   │  navigator.credentials.get()          ↑ 端末が本人確認して秘密鍵で署名
   │  login_verify {signature}       ──▶  保存してある公開鍵で署名を検証 → access_token
   │
-  │  switch/set {on} + Bearer       ──▶  ログインしている人だけが切り替えられる
+  │  tenant/switch_set {tenant, on} ──▶  そのテナントの承認済みメンバーだけが切り替えられる
 ```
 
 **生体情報も秘密鍵もサーバには届きません。** サーバが持つのは公開鍵とその付帯情報だけです。画面の「サーバが保存しているもの」で中身をそのまま見られます。
@@ -82,12 +83,14 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 |---|---|
 | `passkey` | パスキー 1 つにつき 1 行。`user` / `credential_id` / `user_handle` / `public_key`（COSE_Key を base64url） / `alg` / `sign_count` / `transports` / `backup_eligible` / `backed_up` / `aaguid` / `name` / `last_used_at` |
 | `passkey_challenge` | 発行したチャレンジ。検証に来たら成否にかかわらず消す（使い回し防止）。5 分で失効 |
-| `account` | アカウント 1 つにつき 1 行。`status` は `approved` / `pending`、`role` は `admin` / `member`（承認待ちの間は NULL）、`approved_by` / `approved_at` |
+| `account` | アカウント 1 つにつき 1 行。`role` は `admin`（全体の管理者）/ `member`。`status` は常に `approved`（昔の承認制の名残） |
 | `session` | ログイン中のトークン（`skey`）。24 時間で失効。アカウントが消えると無効 |
-| `switch_state` | デモのスイッチ（`value` / `updated_by` / `updated_at`） |
+| `tenant` | テナント。`guid`（URL に使うランダムな 32 桁の 16 進数）/ `name` / `created_by` |
+| `tenant_member` | テナントのメンバー。`tenant_id` / `user` / `status`（`approved` / `pending`）/ `role`（`admin` / `member`、承認待ちの間は NULL）/ `approved_by` / `approved_at` |
+| `switch_state` | テナントの電気。`name = "tenant/<guid>"` / `value` / `updated_by` / `updated_at` |
 
 - パスワードはありません。アカウントの最後のパスキーを消すと、アカウントごと消えます（退会）。
-- `account` テーブル（や `role` 列）が無かった頃の DB で起動すると、パスキーを持っているユーザーと承認済みのユーザーは管理者として引き継がれます（それまでは誰でも許可・削除ができたため）。
+- 古い版の DB で起動すると自動で引き継ぎます。`account` テーブル（や `role` 列）が無かった頃の承認済みユーザーは全体の管理者に、承認待ちだったユーザーは一般になります。
 - `user_handle` は認証器に渡す `user.id` です。アカウントごとにランダムな 32 バイトで、個人情報は入れていません。
 - 時刻はすべて naive な UTC（`YYYY-MM-DD HH:MM:SS`）で保存します。C++ 版と Python 版が同じ DB を読めます。
 
@@ -104,15 +107,23 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | `/api/passkey/v0/register_verify` | 任意 | `credential.toJSON()` の形 + `name` → `{user, passkey}`。新規アカウントなら `access_token` も返す |
 | `/api/passkey/v0/login_options` | 不要 | `{user?}` → `{publicKey}`（`user` を省くと `allowCredentials` が空になり、端末のパスキーから選ぶ） |
 | `/api/passkey/v0/login_verify` | 不要 | `credential.toJSON()` の形 → `{user, access_token}` |
-| `/api/passkey/v0/me` | 要 | → `{user, approved, role, expire}`（`register_verify` / `login_verify` も `approved` と `role` を返す） |
+| `/api/passkey/v0/me` | 要 | → `{user, role, expire}`（`register_verify` / `login_verify` も `role` を返す） |
 | `/api/passkey/v0/logout` | 要 | このトークンのセッションを消す |
 | `/api/passkey/v0/list` | 要 | 自分のパスキー一覧 → `{user, passkey_list, columns, total_count}` |
-| `/api/passkey/v0/delete` | 要 | `{credential_id}` → `{account_deleted}`。最後の 1 本ならアカウントごと消える（最後の管理者は不可） |
-| `/api/account/v0/list` | 承認済み | 全アカウント → `{account_list: [{user, status, role, approved_by, approved_at, created_at, passkey_count}]}` |
-| `/api/account/v0/approve` | 管理者 | `{user, role: "admin" / "member"}` で承認待ちを承認する → `{account}` |
-| `/api/account/v0/delete` | 管理者 | `{user}` で自分以外のアカウントを消す（パスキーとセッションも消える） |
-| `/api/switch/v0/get` | 不要 | → `{on, updated_by, updated_at}` |
-| `/api/switch/v0/set` | 承認済み | `{on: true/false}` → `{on, updated_by, updated_at}` |
+| `/api/passkey/v0/delete` | 要 | `{credential_id}` → `{account_deleted}`。最後の 1 本ならアカウントごと消える（最後の全体の管理者は不可） |
+| `/api/account/v0/list` | 全体の管理者 | 全アカウント → `{account_list: [{user, status, role, approved_by, approved_at, created_at, passkey_count}]}` |
+| `/api/account/v0/set_role` | 全体の管理者 | `{user, role: "admin" / "member"}`。全体の管理者が 0 人になる変更は不可 |
+| `/api/account/v0/delete` | 全体の管理者 | `{user}` で自分以外のアカウントを消す（パスキー・セッション・テナントの所属も消える） |
+| `/api/tenant/v0/get` | 任意 | `{tenant}` → `{tenant: {tenant, name, created_by, created_at, member_count, my_status, my_role, on, updated_by, updated_at}}`。名前は誰でも見えるが、`on` などの電気の状態は承認済みメンバーにだけ返す（他は `null`） |
+| `/api/tenant/v0/list` | 要 | 全体の管理者は全テナント、それ以外は自分が参加（申請）しているテナント → `{tenant_list}` |
+| `/api/tenant/v0/add` | 全体の管理者 | `{name}` → `{tenant}`（`tenant.tenant` が GUID） |
+| `/api/tenant/v0/delete` | 全体の管理者 | `{tenant}`。メンバーと電気の状態も消える |
+| `/api/tenant/v0/join` | 要 | `{tenant}` で参加申請 → `{member}`。管理者がいないテナントなら、そのまま承認済みの管理者 |
+| `/api/tenant/v0/leave` | 要 | `{tenant}` で抜ける（申請の取り下げも）。最後の管理者は、ほかにメンバーがいる間は不可 |
+| `/api/tenant/v0/members` | テナントのメンバー | `{tenant}` → `{me, member_list, total_count}` |
+| `/api/tenant/v0/approve` | テナントの管理者 | `{tenant, user, role: "admin" / "member"}` |
+| `/api/tenant/v0/remove` | テナントの管理者 | `{tenant, user}` で自分以外を外す（承認待ちなら却下） |
+| `/api/tenant/v0/switch_set` | テナントのメンバー | `{tenant, on: true/false}` → `{tenant}` |
 
 ### 検証していること（失敗時の `message`）
 
@@ -135,11 +146,15 @@ cloudflared tunnel --url http://localhost:8080      # https://xxxx.trycloudflare
 | その他 | 壊れた base64 / JSON / CBOR | `invalid request` |
 | | ユーザ名が 1〜64 バイトで制御文字を含まないか | `invalid user name` |
 | | トークンが無効・期限切れ・アカウントが消えた | `not logged in` |
-| アカウント | 承認待ちのユーザーが承認済み限定の API を呼んだ | `not approved` |
-| | 一般メンバーが許可・削除しようとした | `admin only` |
+| アカウント | 全体の管理者だけの API を一般が呼んだ | `admin only` |
 | | `role` が `admin` / `member` でない | `invalid role` |
-| | 存在しない / 承認済み / 自分自身 | `unknown account` / `already approved` / `cannot delete yourself` |
-| | 管理者が自分 1 人なのに最後のパスキーを消そうとした | `last admin cannot leave` |
+| | 存在しない / 自分自身 | `unknown account` / `cannot delete yourself` |
+| | 全体の管理者が 0 人になる | `last admin cannot be demoted` / `last admin cannot leave` |
+| テナント | GUID が無い / 存在しない | `invalid request` / `unknown tenant` |
+| | テナント名が 1〜64 バイトでない、同じ名前がある | `invalid tenant name` / `tenant already exists` |
+| | 承認済みメンバー / 管理者でない | `tenant member only` / `tenant admin only` |
+| | 申請済み / 承認済み / メンバーにいない | `already requested` / `already approved` / `unknown member` |
+| | ほかにメンバーがいるのに最後の管理者が抜けようとした | `last admin cannot leave` |
 
 ### やっていないこと
 
@@ -158,7 +173,7 @@ src/server_sample/
 │   ├── main/
 │   │   ├── lambda_server.cpp       エントリポイント
 │   │   ├── testsv_api_passkey.h    パスキー API（CBOR / COSE / 署名検証 / セッション）
-│   │   ├── testsv_api_switch.h     スイッチ API
+│   │   ├── testsv_api_tenant.h     テナントとテナントごとの電気の API
 │   │   ├── lambda_server.h         Bearer の取り出し、CORS
 │   │   └── database.h              SQLite / MySQL の切替（#define USE_MYSQL）
 │   ├── models/                     sqlpp11 のテーブル定義（*.ddl → ddl2cpp で model_*.h）
@@ -168,8 +183,8 @@ src/server_sample/
 └── python/
     ├── lambda_server.py            エントリポイント（FastAPI、Lambda では Mangum）
     ├── testsv_api_passkey.py       パスキー API
-    ├── testsv_api_switch.py        スイッチ API
-    ├── model_passkey.py model_switch.py   SQLAlchemy のモデル
+    ├── testsv_api_tenant.py        テナントとテナントごとの電気の API
+    ├── model_passkey.py model_tenant.py model_switch.py   SQLAlchemy のモデル
     ├── database.py                 接続先（既定 SQLite、RDS_PROXY_HOST / DATABASE_URL で切替）
     └── html/index.html
 
@@ -207,45 +222,15 @@ python ../../tests/cpp/test_passkey.py
 python tests/browser_e2e.py http://localhost:8099
 ```
 
-`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系、役割・承認・削除も確認します（C++ / Python とも 145 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、1 人目の登録（自動で管理者）→ スイッチ → 2 人目の登録（承認待ち）→ 一般として許可（ボタンが出ないこと）→ 2 人目がスイッチ → 最後の管理者は退会できない → 3 人目を管理者として許可 → 2 人目を削除 → ログアウト・ログイン → 退会までを画面から通します。**DB が空のサーバ**に対して実行してください。
+`passkey_common.py` はソフトウェアの認証器（P-256 / RSA の鍵を持ち、authenticatorData を組み立てて署名する）を使います。正常系に加えて、改ざん、使い回し、期限切れ、他人の credential、壊れた入力といった拒否系、全体の役割、テナントの追加・参加・承認・電気・外す・抜ける・削除も確認します（C++ / Python とも 188 項目）。`browser_e2e.py` は Chromium の仮想認証器（DevTools Protocol の `WebAuthn` ドメイン）を使い、全体の管理者がテナントを追加 → URL を開いた人が参加して自動でテナントの管理者 → 別の人が参加申請 → テナントの管理者が一般として承認 → 電気を切り替えて相手の画面に反映 → 全体の管理者にはテナントの電気が見えない → メンバーを外す → 全体の管理者を増やす → テナント削除 → ログアウト・ログイン → 退会までを、3 人分のブラウザで画面から通します。**DB が空のサーバ**に対して実行してください。
 
 ---
 
 ## 6. 今後やりたいこと
 
-### 建物ごとの電気と、建物ごとの担当者
-
-いまのスイッチは全体で 1 つ（`switch_state` の `name = "light"` の 1 行）です。これを次のように広げる予定です。
-
-- **建物を増やせるようにする。** 建物ごとに電気のスイッチを持たせる（必要なら 1 つの建物に複数のスイッチも）
-- **建物ごとに、電気を操作できる人を登録できるようにする。** 登録されていない建物のスイッチは押せない
-
-たたき台（まだ決めていない）:
-
-| テーブル | 中身 |
-|---|---|
-| `building` | `id` / `name` / `created_by` / `created_at` |
-| `building_member` | `building_id` / `user` / 権限（操作だけか、担当者の追加・削除もできるか）/ `added_by` / `added_at` |
-| `switch_state` | `name` の代わりに `building_id`（＋スイッチ名）で引く |
-
-| API の案 | 説明 |
-|---|---|
-| `/api/building/v0/list` | 建物の一覧（自分が操作できるかどうか付き） |
-| `/api/building/v0/add` / `delete` | 建物を作る・消す |
-| `/api/building/v0/member_add` / `member_delete` / `member_list` | 建物の担当者を登録・解除・一覧 |
-| `/api/switch/v0/get` / `set` | `building_id` を受け取るようにする。`set` は担当者だけ |
-
-決めること:
-
-- 建物を作る・消すのは誰か（全体の管理者だけか）
-- 建物の担当者を登録できるのは誰か（全体の管理者だけか、その建物の担当者もか）
-- 全体の管理者は、担当でない建物のスイッチも押せるか
-- いまの 1 つのスイッチを、最初の建物として引き継ぐか
-- 状態の取得（`get`）は今までどおり誰でも見られるままでよいか
-
-### その他
-
-- 承認したあとで役割を変える（一般を管理者に上げる、管理者を一般に下げる）機能
+- テナントに電気を複数持たせる（部屋ごとなど）
+- テナントの管理者が、承認済みメンバーの役割（管理者 / 一般）をあとから変える機能
+- テナントの URL（GUID）を作り直す機能（URL が漏れたとき用）
 - MySQL での実際の動作確認と、AWS Lambda への配置の確認
 
 ---
